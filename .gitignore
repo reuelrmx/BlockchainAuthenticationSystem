@@ -1,0 +1,24 @@
+# Node
+node_modules/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Environment and logs
+.env
+*.log
+
+# Generated device identities
+gateway/device-client/devices/*
+!gateway/device-client/devices/.gitkeep
+
+# Cryptographic private material
+*.pem
+projectkey.txt
+projectkey.txt.pub
+
+# Fabric-generated identities
+blockchain/identities/*
+!blockchain/identities/.gitkeep

@@ -1,0 +1,24 @@
+{
+  "name": "blockchain-authentication-backend",
+  "version": "1.0.0",
+  "description": "Gateway API for the blockchain-based network authentication system",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "node --check src/server.js"
+  },
+  "author": "Ruel Mumba",
+  "license": "MIT",
+  "dependencies": {
+    "@grpc/grpc-js": "^1.13.0",
+    "@hyperledger/fabric-gateway": "^1.8.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.0.0",
+    "express": "^5.0.0",
+    "uuid": "^11.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}

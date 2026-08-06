@@ -1,0 +1,13 @@
+{
+  "name": "blockchain-auth-device-client",
+  "version": "1.0.0",
+  "description": "Device-side identity and authentication client",
+  "main": "register-device.js",
+  "scripts": {
+    "register": "node register-device.js",
+    "test-signature": "node test-signature.js",
+    "check": "node --check register-device.js && node --check test-signature.js"
+  },
+  "author": "Ruel Mumba",
+  "license": "MIT"
+}
