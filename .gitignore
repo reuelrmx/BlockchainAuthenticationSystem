@@ -1,0 +1,10 @@
+node_modules/
+venv/
+.env
+*.log
+wallet/
+connection-profile/
+blockchain/identities/*
+!blockchain/identities/.gitkeep
+projectkey.txt
+projectkey.txt.pub
