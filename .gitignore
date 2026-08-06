@@ -22,3 +22,7 @@ projectkey.txt.pub
 # Fabric-generated identities
 blockchain/identities/*
 !blockchain/identities/.gitkeep
+
+# Operating system files
+.DS_Store
+Thumbs.db
