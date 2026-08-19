@@ -5,11 +5,13 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 
+const authRoutes = require("./routes/authRoutes");
 const deviceRoutes = require("./routes/deviceRoutes");
 const errorHandler = require("./middleware/errorHandler");
 
 const {
     connectToFabric,
+    evaluateTransaction,
     closeFabricConnection
 } = require("./services/fabricService");
 
@@ -31,7 +33,7 @@ app.get("/", (req, res) => {
 
 app.get("/api/health", async (req, res, next) => {
     try {
-        await connectToFabric();
+        await evaluateTransaction("GetAllDevices");
 
         res.status(200).json({
             success: true,
@@ -39,10 +41,24 @@ app.get("/api/health", async (req, res, next) => {
             fabric: "connected"
         });
     } catch (error) {
-        next(error);
+        console.error(
+            "Fabric health check failed:",
+            {
+                message: error.message,
+                code: error.code,
+                details: error.details
+            }
+        );
+
+        res.status(503).json({
+            success: false,
+            api: "healthy",
+            fabric: "unavailable"
+        });
     }
 });
 
+app.use("/api/auth", authRoutes);
 app.use("/api/devices", deviceRoutes);
 
 app.use((req, res) => {

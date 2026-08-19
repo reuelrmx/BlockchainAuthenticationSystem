@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node --check src/server.js"
+    "test": "node --check src/server.js && node --check src/config/fabricConfig.js && node --check src/config/authConfig.js && node --check src/services/fabricService.js && node --check src/services/challengeService.js && node --check src/controllers/deviceController.js && node --check src/controllers/authController.js && node --check src/routes/deviceRoutes.js && node --check src/routes/authRoutes.js && node --check src/middleware/errorHandler.js"
   },
   "author": "Ruel Mumba",
   "license": "MIT",
