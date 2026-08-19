@@ -26,6 +26,14 @@ evaluation/results/*.json
 evaluation/results/*.csv
 !evaluation/results/.gitkeep
 
+# Generated traditional-authentication comparison output
+comparison/results/*.json
+comparison/results/*.csv
+comparison/results/*.md
+!comparison/results/.gitkeep
+comparison/radius/runtime/
+comparison/ldap/runtime/
+
 # Generated device identities
 gateway/device-client/devices/*
 !gateway/device-client/devices/.gitkeep
