@@ -73,6 +73,10 @@ export function getAuthenticationEvents() {
   return request("/api/audit/authentication");
 }
 
+export function getPerformanceSummary() {
+  return request("/api/performance/summary");
+}
+
 export function suspendDevice(did, reason) {
   return request(`/api/devices/${encodeURIComponent(did)}/suspend`, {
     method: "PATCH",

@@ -415,6 +415,30 @@ nav {
   padding: 18px;
 }
 
+.requirement-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 18px;
+}
+
+.requirement-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 52px;
+  border: 1px solid #edf1ef;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.requirement-item span {
+  color: #4c5b57;
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .health-item {
   display: grid;
   grid-template-columns: 80px auto minmax(0, 1fr);
@@ -573,6 +597,10 @@ table {
   width: 100%;
   min-width: 1120px;
   border-collapse: collapse;
+}
+
+.performance-table {
+  min-width: 920px;
 }
 
 th,
@@ -769,7 +797,8 @@ pre {
   }
 
   .stat-grid,
-  .detail-grid {
+  .detail-grid,
+  .requirement-grid {
     grid-template-columns: 1fr;
   }
 

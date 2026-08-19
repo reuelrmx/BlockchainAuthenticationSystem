@@ -63,6 +63,9 @@ function calculateStats(values) {
     const p95Index = count >= 2
         ? Math.ceil(0.95 * count) - 1
         : null;
+    const p99Index = count >= 2
+        ? Math.ceil(0.99 * count) - 1
+        : null;
 
     return {
         count,
@@ -73,7 +76,10 @@ function calculateStats(values) {
         standardDeviation: roundNumber(Math.sqrt(variance)),
         p95: p95Index === null
             ? null
-            : roundNumber(numbers[Math.min(p95Index, count - 1)])
+            : roundNumber(numbers[Math.min(p95Index, count - 1)]),
+        p99: p99Index === null
+            ? null
+            : roundNumber(numbers[Math.min(p99Index, count - 1)])
     };
 }
 

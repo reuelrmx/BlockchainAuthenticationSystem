@@ -3,6 +3,7 @@ import {
   Activity,
   AlertTriangle,
   Ban,
+  BarChart3,
   CheckCircle2,
   Clock3,
   Database,
@@ -30,6 +31,7 @@ import {
   getAuthenticationEvents,
   getDevices,
   getHealth,
+  getPerformanceSummary,
   loginAdmin,
   logoutAdmin,
   revokeDevice,
@@ -56,6 +58,11 @@ const NAV_ITEMS = [
     id: "alerts",
     label: "Spoofing Alerts",
     icon: ShieldAlert
+  },
+  {
+    id: "performance",
+    label: "Performance",
+    icon: BarChart3
   }
 ];
 
@@ -88,6 +95,24 @@ function formatDate(value) {
   }
 
   return date.toLocaleString();
+}
+
+function formatMetric(value, suffix = "") {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "Unavailable";
+  }
+
+  return `${Number(value).toLocaleString(undefined, {
+    maximumFractionDigits: 3
+  })}${suffix}`;
+}
+
+function formatPercent(value) {
+  return formatMetric(value, "%");
+}
+
+function formatMs(value) {
+  return formatMetric(value, " ms");
 }
 
 function shortId(value) {
@@ -790,6 +815,210 @@ function SpoofingAlertsView({ events, error }) {
   );
 }
 
+function RequirementBadge({ value }) {
+  if (value === null || value === undefined) {
+    return <span className="badge spoofing-NOT_EVALUATED">UNAVAILABLE</span>;
+  }
+
+  return value ? (
+    <span className="badge decision-GRANTED">PASS</span>
+  ) : (
+    <span className="badge decision-DENIED">FAIL</span>
+  );
+}
+
+function PerformanceTable({ results }) {
+  const rows = ["1", "10", "25", "50"]
+    .map((level) => ({
+      level,
+      result: results?.[level]
+    }))
+    .filter((row) => row.result);
+
+  if (rows.length === 0) {
+    return <EmptyState message="No evaluation data available." />;
+  }
+
+  return (
+    <div className="table-wrap">
+      <table className="performance-table">
+        <thead>
+          <tr>
+            <th>Concurrency</th>
+            <th>Success Rate</th>
+            <th>Mean Latency</th>
+            <th>Median</th>
+            <th>P95</th>
+            <th>Throughput</th>
+            <th>Latency Increase</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(({ level, result }) => (
+            <tr key={level}>
+              <td>{level}</td>
+              <td>{formatPercent(result.successRatePercent)}</td>
+              <td>{formatMs(result.meanLatencyMs)}</td>
+              <td>{formatMs(result.medianLatencyMs)}</td>
+              <td>{formatMs(result.p95LatencyMs)}</td>
+              <td>
+                {formatMetric(result.throughputPerSecond, " auth/s")}
+              </td>
+              <td>
+                {formatPercent(
+                  result.latencyIncreaseVsConcurrency1Percent
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function PerformanceView({ performance, health, error }) {
+  const live = performance?.live || {};
+  const formal = performance?.formal || {};
+  const level50 = formal.results?.["50"] || null;
+  const requirementStatus = formal.requirementStatus || {};
+
+  return (
+    <div className="view-stack">
+      {error ? <ErrorState message={error} /> : null}
+      <div className="stat-grid">
+        <StatCard
+          icon={Network}
+          label="Fabric Health"
+          value={health?.fabric || "Unavailable"}
+          detail={health?.api ? `API ${health.api}` : null}
+        />
+        <StatCard
+          icon={CheckCircle2}
+          label="Live Success Rate"
+          value={formatPercent(live.successRatePercent)}
+          detail={`${live.grantedSinceStart || 0} granted / ${live.deniedSinceStart || 0} denied`}
+          tone="success"
+        />
+        <StatCard
+          icon={Clock3}
+          label="Recent Mean Latency"
+          value={formatMs(live.meanRecentAuthenticationLatencyMs)}
+          detail="Process-lifetime sample"
+        />
+        <StatCard
+          icon={Activity}
+          label="Observed Authentication Throughput"
+          value={formatMetric(live.recentThroughputPerSecond, " auth/s")}
+          detail={`${live.recentThroughputWindowSeconds || 60}s live window`}
+        />
+        <StatCard
+          icon={Gauge}
+          label="Formal P95 Latency"
+          value={formatMs(level50?.p95LatencyMs)}
+          detail="50-concurrent result"
+        />
+        <StatCard
+          icon={ShieldAlert}
+          label="Avg Spoofing Check"
+          value={formatMs(
+            level50?.spoofingCheckDurationMs?.mean ??
+              live.meanRecentSpoofingCheckDurationMs
+          )}
+        />
+        <StatCard
+          icon={BarChart3}
+          label="50 Concurrent"
+          value={
+            formal.requirement50Concurrent
+              ? formal.requirement50Concurrent.passed ? "PASS" : "FAIL"
+              : "Unavailable"
+          }
+          detail={formal.fileName || "No formal concurrency summary"}
+          tone={
+            formal.requirement50Concurrent?.passed
+              ? "success"
+              : "warning"
+          }
+        />
+        <StatCard
+          icon={FileText}
+          label="Last Evaluation"
+          value={formatDate(formal.evaluationDate)}
+        />
+      </div>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <h2>Requirement Status</h2>
+            <p>Calculated from measured concurrency results.</p>
+          </div>
+          <BarChart3 size={22} aria-hidden="true" />
+        </div>
+        {!formal.available ? (
+          <EmptyState message={formal.message || "No evaluation data available."} />
+        ) : (
+          <div className="requirement-grid">
+            <div className="requirement-item">
+              <span>Authentication &lt;= 5 s</span>
+              <RequirementBadge
+                value={requirementStatus.authenticationUnder5Seconds}
+              />
+            </div>
+            <div className="requirement-item">
+              <span>Spoofing &lt;= 3 s</span>
+              <RequirementBadge value={requirementStatus.spoofingUnder3Seconds} />
+            </div>
+            <div className="requirement-item">
+              <span>50 concurrent</span>
+              <RequirementBadge value={requirementStatus.fiftyConcurrent} />
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading table-heading">
+          <div>
+            <h2>Formal Evaluation Metrics</h2>
+            <p>Concurrency summary generated by the Phase 11 harness.</p>
+          </div>
+        </div>
+        {!formal.available ? (
+          <EmptyState message={formal.message || "No evaluation data available."} />
+        ) : (
+          <PerformanceTable results={formal.results} />
+        )}
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <h2>Live Operational Metrics</h2>
+            <p>{live.persistence || "Process-lifetime metrics."}</p>
+          </div>
+          <Activity size={22} aria-hidden="true" />
+        </div>
+        <div className="detail-grid">
+          <DetailItem
+            label="Attempts Since Start"
+            value={live.totalAttemptsSinceStart}
+          />
+          <DetailItem
+            label="Recent P95"
+            value={formatMs(live.p95RecentAuthenticationLatencyMs)}
+          />
+          <DetailItem
+            label="Last Authentication"
+            value={formatDate(live.lastAuthenticationAt)}
+          />
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function ActionModal({
   actionState,
   reason,
@@ -958,6 +1187,7 @@ function App() {
   const [health, setHealth] = useState(null);
   const [devices, setDevices] = useState(null);
   const [events, setEvents] = useState(null);
+  const [performance, setPerformance] = useState(null);
   const [errors, setErrors] = useState({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -977,23 +1207,26 @@ function App() {
     setRefreshing(true);
     setErrors({});
 
-    const [healthResult, devicesResult, auditResult] =
+    const [healthResult, devicesResult, auditResult, performanceResult] =
       await Promise.allSettled([
         getHealth(),
         getDevices(),
-        getAuthenticationEvents()
+        getAuthenticationEvents(),
+        getPerformanceSummary()
       ]);
     const nextErrors = {};
 
     if (
       isUnauthorizedResult(devicesResult) ||
-      isUnauthorizedResult(auditResult)
+      isUnauthorizedResult(auditResult) ||
+      isUnauthorizedResult(performanceResult)
     ) {
       setAdmin(null);
       setAuthError("Your administrator session has expired");
       setHealth(null);
       setDevices(null);
       setEvents(null);
+      setPerformance(null);
       setSelectedDevice(null);
       setLoading(false);
       setRefreshing(false);
@@ -1028,6 +1261,13 @@ function App() {
     } else {
       setEvents(null);
       nextErrors.audit = auditResult.reason.message;
+    }
+
+    if (performanceResult.status === "fulfilled") {
+      setPerformance(performanceResult.value.data || null);
+    } else {
+      setPerformance(null);
+      nextErrors.performance = performanceResult.reason.message;
     }
 
     setErrors(nextErrors);
@@ -1145,6 +1385,7 @@ function App() {
     setHealth(null);
     setDevices(null);
     setEvents(null);
+    setPerformance(null);
     setErrors({});
     setSelectedDevice(null);
     setActionState(null);
@@ -1305,6 +1546,14 @@ function App() {
 
         {!loading && activeView === "alerts" ? (
           <SpoofingAlertsView events={events} error={errors.audit} />
+        ) : null}
+
+        {!loading && activeView === "performance" ? (
+          <PerformanceView
+            performance={performance}
+            health={health}
+            error={errors.performance}
+          />
         ) : null}
       </main>
 

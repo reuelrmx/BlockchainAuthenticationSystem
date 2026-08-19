@@ -99,3 +99,47 @@ denials. In the current design, `/api/auth/verify` records authentication
 events, while suspended/revoked devices are denied by `/api/auth/challenge`
 before a verification attempt exists. The evaluator reports this explicitly as
 current behavior rather than changing the logging architecture during Phase 8.
+
+## Phase 11 Concurrent Authentication Capacity
+
+Run the formal HTTPS concurrency evaluator with explicit CA verification:
+
+```sh
+EVALUATION_ADMIN_USERNAME=<admin-or-viewer> \
+EVALUATION_ADMIN_PASSWORD=<password> \
+node evaluation/run-concurrency.js \
+  --api https://localhost:3443 \
+  --ca backend/certs/server-cert.pem \
+  --device gateway/device-client/devices/33bad912-4914-449f-b674-7c5fba40d9d8 \
+  --concurrency 50 \
+  --rounds 3
+```
+
+The backend should be running with:
+
+```sh
+HTTPS_ENABLED=true
+ALLOW_SIMULATED_NETWORK_CONTEXT=true
+```
+
+The Phase 11 harness launches complete authentication flows concurrently:
+challenge issuance, local ECDSA signing, verification, on-chain
+`VerifyAuthentication`, spoofing classification, and audit logging. It does not
+bypass the gateway, Fabric, or chaincode path.
+
+The concurrency test uses one registered cryptographic test identity to produce
+concurrent virtual authentication requests. Every request receives an
+independent challenge ID, nonce, signature, and audit event. This avoids
+creating 50 unnecessary blockchain identities and must not be described as 50
+physical devices.
+
+Generated Phase 11 outputs are ignored by Git:
+
+- `evaluation/results/concurrency-<timestamp>.json`
+- `evaluation/results/concurrency-summary-<timestamp>.json`
+- `evaluation/results/concurrency-observations-<timestamp>.csv`
+
+Throughput is reported as completed authentication flows divided by elapsed
+timed round wall-clock seconds. It is observed end-to-end authentication
+throughput for this local prototype, not theoretical Hyperledger Fabric maximum
+throughput.

@@ -28,6 +28,10 @@ const {
     evaluateSpoofing
 } = require("../services/spoofingService");
 
+const {
+    recordAuthenticationAttempt
+} = require("../services/performanceMetricsService");
+
 const AUDIT_REASONS = {
     VALID_SIGNATURE: "VALID_SIGNATURE",
     INVALID_SIGNATURE: "INVALID_SIGNATURE",
@@ -184,6 +188,47 @@ function buildContractResponseBody({
     return body;
 }
 
+function elapsedMs(startedAt) {
+    if (!startedAt) {
+        return null;
+    }
+
+    return Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+}
+
+function recordVerificationMetric({
+    requestStartedAt,
+    statusCode,
+    body,
+    spoofingCheckDurationMs
+}) {
+    recordAuthenticationAttempt({
+        decision: body.decision,
+        authenticated: body.authenticated === true,
+        httpStatus: statusCode,
+        totalAuthenticationDurationMs: elapsedMs(requestStartedAt),
+        spoofingCheckDurationMs:
+            body.spoofingCheckDurationMs ?? spoofingCheckDurationMs ?? null
+    });
+}
+
+function sendVerificationResponse({
+    res,
+    statusCode,
+    body,
+    requestStartedAt,
+    spoofingCheckDurationMs
+}) {
+    recordVerificationMetric({
+        requestStartedAt,
+        statusCode,
+        body,
+        spoofingCheckDurationMs
+    });
+
+    return res.status(statusCode).json(body);
+}
+
 async function respondWithAuditedDecision({
     res,
     statusCode,
@@ -195,7 +240,8 @@ async function respondWithAuditedDecision({
     observedMacAddress,
     observedIpAddress,
     spoofingClassification = DEFAULT_SPOOFING_CLASSIFICATION,
-    spoofingCheckDurationMs
+    spoofingCheckDurationMs,
+    requestStartedAt
 }) {
     let auditEvent;
 
@@ -221,11 +267,16 @@ async function respondWithAuditedDecision({
             }
         );
 
-        return res.status(502).json({
-            success: false,
-            authenticated: false,
-            decision: "DENIED",
-            reason: "Authentication audit logging failed"
+        return sendVerificationResponse({
+            res,
+            statusCode: 502,
+            requestStartedAt,
+            body: {
+                success: false,
+                authenticated: false,
+                decision: "DENIED",
+                reason: "Authentication audit logging failed"
+            }
         });
     }
 
@@ -246,7 +297,13 @@ async function respondWithAuditedDecision({
         body.reason = clientReason;
     }
 
-    return res.status(statusCode).json(body);
+    return sendVerificationResponse({
+        res,
+        statusCode,
+        body,
+        requestStartedAt,
+        spoofingCheckDurationMs
+    });
 }
 
 /**
@@ -335,6 +392,7 @@ async function createAuthenticationChallenge(req, res, next) {
  */
 async function verifyAuthenticationChallenge(req, res, next) {
     try {
+        const requestStartedAt = process.hrtime.bigint();
         const suppliedDid = req.body?.did;
         const suppliedChallengeId = req.body?.challengeId;
         const suppliedSignature = req.body?.signature;
@@ -345,18 +403,32 @@ async function verifyAuthenticationChallenge(req, res, next) {
             typeof suppliedDid !== "string" ||
             suppliedDid.trim() === ""
         ) {
-            return res.status(400).json({
-                success: false,
-                message: "DID is required"
+            return sendVerificationResponse({
+                res,
+                statusCode: 400,
+                requestStartedAt,
+                body: {
+                    success: false,
+                    authenticated: false,
+                    decision: "DENIED",
+                    message: "DID is required"
+                }
             });
         }
 
         const did = suppliedDid.trim();
 
         if (!isValidFabricDid(did)) {
-            return res.status(400).json({
-                success: false,
-                message: "DID must use the did:fabric:<identifier> format"
+            return sendVerificationResponse({
+                res,
+                statusCode: 400,
+                requestStartedAt,
+                body: {
+                    success: false,
+                    authenticated: false,
+                    decision: "DENIED",
+                    message: "DID must use the did:fabric:<identifier> format"
+                }
             });
         }
 
@@ -364,25 +436,46 @@ async function verifyAuthenticationChallenge(req, res, next) {
             typeof suppliedChallengeId !== "string" ||
             suppliedChallengeId.trim() === ""
         ) {
-            return res.status(400).json({
-                success: false,
-                message: "Challenge ID is required"
+            return sendVerificationResponse({
+                res,
+                statusCode: 400,
+                requestStartedAt,
+                body: {
+                    success: false,
+                    authenticated: false,
+                    decision: "DENIED",
+                    message: "Challenge ID is required"
+                }
             });
         }
 
         const challengeId = suppliedChallengeId.trim();
 
         if (!isValidChallengeId(challengeId)) {
-            return res.status(400).json({
-                success: false,
-                message: "Challenge ID is invalid"
+            return sendVerificationResponse({
+                res,
+                statusCode: 400,
+                requestStartedAt,
+                body: {
+                    success: false,
+                    authenticated: false,
+                    decision: "DENIED",
+                    message: "Challenge ID is invalid"
+                }
             });
         }
 
         if (!isNonEmptyBase64(suppliedSignature)) {
-            return res.status(400).json({
-                success: false,
-                message: "Signature must be a non-empty Base64 string"
+            return sendVerificationResponse({
+                res,
+                statusCode: 400,
+                requestStartedAt,
+                body: {
+                    success: false,
+                    authenticated: false,
+                    decision: "DENIED",
+                    message: "Signature must be a non-empty Base64 string"
+                }
             });
         }
 
@@ -399,7 +492,8 @@ async function verifyAuthenticationChallenge(req, res, next) {
                 clientReason: "Invalid or expired authentication challenge",
                 authenticated: false,
                 observedMacAddress,
-                observedIpAddress
+                observedIpAddress,
+                requestStartedAt
             });
         }
 
@@ -424,7 +518,8 @@ async function verifyAuthenticationChallenge(req, res, next) {
                 clientReason: "Invalid authentication challenge",
                 authenticated: false,
                 observedMacAddress,
-                observedIpAddress
+                observedIpAddress,
+                requestStartedAt
             });
         }
 
@@ -440,9 +535,16 @@ async function verifyAuthenticationChallenge(req, res, next) {
                 observedNetworkContext.observedIpAddress || "";
         } catch (error) {
             if (error.statusCode === 400) {
-                return res.status(400).json({
-                    success: false,
-                    message: error.message
+                return sendVerificationResponse({
+                    res,
+                    statusCode: 400,
+                    requestStartedAt,
+                    body: {
+                        success: false,
+                        authenticated: false,
+                        decision: "DENIED",
+                        message: error.message
+                    }
                 });
             }
 
@@ -463,7 +565,8 @@ async function verifyAuthenticationChallenge(req, res, next) {
                 clientReason: "Unable to evaluate network context",
                 authenticated: false,
                 observedMacAddress,
-                observedIpAddress
+                observedIpAddress,
+                requestStartedAt
             });
         }
 
@@ -508,7 +611,8 @@ async function verifyAuthenticationChallenge(req, res, next) {
                 clientReason: "Unable to evaluate network context",
                 authenticated: false,
                 observedMacAddress,
-                observedIpAddress
+                observedIpAddress,
+                requestStartedAt
             });
         }
 
@@ -538,11 +642,16 @@ async function verifyAuthenticationChallenge(req, res, next) {
                 }
             );
 
-            return res.status(502).json({
-                success: false,
-                authenticated: false,
-                decision: "DENIED",
-                reason: "Unable to verify device identity"
+            return sendVerificationResponse({
+                res,
+                statusCode: 502,
+                requestStartedAt,
+                body: {
+                    success: false,
+                    authenticated: false,
+                    decision: "DENIED",
+                    reason: "Unable to verify device identity"
+                }
             });
         }
 
@@ -553,7 +662,13 @@ async function verifyAuthenticationChallenge(req, res, next) {
             spoofingCheckDurationMs
         });
 
-        return res.status(statusCode).json(body);
+        return sendVerificationResponse({
+            res,
+            statusCode,
+            body,
+            requestStartedAt,
+            spoofingCheckDurationMs
+        });
     } catch (error) {
         next(error);
     }

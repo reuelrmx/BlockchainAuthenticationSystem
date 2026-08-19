@@ -14,6 +14,7 @@ const adminRoutes = require("./routes/adminRoutes");
 const auditRoutes = require("./routes/auditRoutes");
 const authRoutes = require("./routes/authRoutes");
 const deviceRoutes = require("./routes/deviceRoutes");
+const performanceRoutes = require("./routes/performanceRoutes");
 const errorHandler = require("./middleware/errorHandler");
 
 const {
@@ -86,6 +87,7 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/audit", auditRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/devices", deviceRoutes);
+app.use("/api/performance", performanceRoutes);
 
 app.use((req, res) => {
     res.status(404).json({

@@ -11,6 +11,8 @@ const dashboardAdminPassword = process.env.DASHBOARD_ADMIN_PASSWORD || "";
 const dashboardExpectedRole = (
   process.env.DASHBOARD_EXPECT_ROLE || "ADMIN"
 ).toUpperCase();
+const expectNoEvaluationData =
+  process.env.DASHBOARD_EXPECT_NO_EVALUATION === "true";
 const ignoreCertificateErrors =
   process.env.CHROME_IGNORE_CERT_ERRORS === "true";
 const suspendTestDid = process.env.SUSPEND_TEST_DID ||
@@ -479,10 +481,37 @@ async function runChecks(client) {
     })()
   `);
 
+  await clickButton(client, "Performance");
+  await waitForCondition(
+    client,
+    `document.body.innerText.includes("Live Operational Metrics") &&
+      document.body.innerText.includes("Formal Evaluation Metrics")`,
+    "performance view"
+  );
+
+  const performance = await client.evaluate(`
+    (() => ({
+      hasLiveMetrics: document.body.innerText.includes("Attempts Since Start"),
+      hasNoEvaluationMessage:
+        document.body.innerText.includes("No evaluation data available"),
+      hasConcurrencyTable:
+        document.querySelectorAll("table.performance-table tbody tr").length > 0
+    }))()
+  `);
+
+  if (expectNoEvaluationData && !performance.hasNoEvaluationMessage) {
+    throw new Error("Performance view did not show the no-evaluation-data state");
+  }
+
+  if (expectNoEvaluationData && performance.hasConcurrencyTable) {
+    throw new Error("Performance view showed formal concurrency rows without evaluation data");
+  }
+
   return {
     overview,
     deviceRows,
-    alerts
+    alerts,
+    performance
   };
 }
 
