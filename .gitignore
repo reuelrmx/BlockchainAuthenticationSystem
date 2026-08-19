@@ -15,6 +15,11 @@ __pycache__/
 attacks/results/*.json
 !attacks/results/.gitkeep
 
+# Generated evaluation output
+evaluation/results/*.json
+evaluation/results/*.csv
+!evaluation/results/.gitkeep
+
 # Generated device identities
 gateway/device-client/devices/*
 !gateway/device-client/devices/.gitkeep
