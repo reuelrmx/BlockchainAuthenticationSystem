@@ -1,5 +1,7 @@
 "use strict";
 
+const crypto = require("node:crypto");
+
 const {
     evaluateTransaction
 } = require("../services/fabricService");
@@ -11,13 +13,12 @@ const {
 } = require("../services/challengeService");
 
 const {
-    verifySignature
-} = require("../services/signatureService");
-
-const {
     DEFAULT_SPOOFING_CLASSIFICATION,
-    recordAuthenticationEvent
+    recordAuthenticationEvent,
+    verifyAuthentication
 } = require("../services/auditService");
+
+const spoofingConfig = require("../config/spoofingConfig");
 
 const {
     getObservedNetworkContext
@@ -107,6 +108,80 @@ function getChallengeAuditReason(consumptionReason) {
     }
 
     return AUDIT_REASONS.INVALID_CHALLENGE;
+}
+
+function getHttpStatusForContractDecision(result) {
+    if (result.authenticated || result.decision === "GRANTED") {
+        return 200;
+    }
+
+    if (
+        result.reason === AUDIT_REASONS.DEVICE_NOT_ACTIVE ||
+        result.reason === AUDIT_REASONS.MAC_MISMATCH ||
+        result.reason === AUDIT_REASONS.IP_MISMATCH ||
+        result.reason === AUDIT_REASONS.MAC_AND_IP_MISMATCH ||
+        result.reason === AUDIT_REASONS.CONTEXT_INCOMPLETE
+    ) {
+        return 403;
+    }
+
+    return 401;
+}
+
+function getClientReasonForContractDecision(result) {
+    if (result.authenticated || result.decision === "GRANTED") {
+        return null;
+    }
+
+    if (
+        result.reason === AUDIT_REASONS.MAC_MISMATCH ||
+        result.reason === AUDIT_REASONS.IP_MISMATCH ||
+        result.reason === AUDIT_REASONS.MAC_AND_IP_MISMATCH
+    ) {
+        return "Network context mismatch detected";
+    }
+
+    if (result.reason === AUDIT_REASONS.CONTEXT_INCOMPLETE) {
+        return "Network context incomplete";
+    }
+
+    if (result.reason === AUDIT_REASONS.DEVICE_NOT_ACTIVE) {
+        return "Device is not active";
+    }
+
+    return "Invalid authentication proof";
+}
+
+function buildContractResponseBody({
+    did,
+    contractResult,
+    spoofingCheckDurationMs
+}) {
+    const authenticated = Boolean(contractResult.authenticated);
+    const body = {
+        success: authenticated,
+        authenticated,
+        decision: contractResult.decision,
+        did,
+        auditEventId: contractResult.eventId,
+        spoofingClassification:
+            contractResult.spoofingClassification ||
+            DEFAULT_SPOOFING_CLASSIFICATION
+    };
+
+    if (contractResult.transactionId) {
+        body.transactionId = contractResult.transactionId;
+    }
+
+    if (typeof spoofingCheckDurationMs === "number") {
+        body.spoofingCheckDurationMs = spoofingCheckDurationMs;
+    }
+
+    if (!authenticated) {
+        body.reason = getClientReasonForContractDecision(contractResult);
+    }
+
+    return body;
 }
 
 async function respondWithAuditedDecision({
@@ -353,108 +428,7 @@ async function verifyAuthenticationChallenge(req, res, next) {
             });
         }
 
-        let device;
-
-        try {
-            device = await getRegisteredDevice(did);
-        } catch (error) {
-            console.error(
-                "Identity registry query failed during authentication verification:",
-                {
-                    message: error.message,
-                    code: error.code,
-                    details: error.details
-                }
-            );
-
-            return respondWithAuditedDecision({
-                res,
-                statusCode: 502,
-                did,
-                decision: "DENIED",
-                auditReason: AUDIT_REASONS.INTERNAL_VERIFICATION_ERROR,
-                clientReason: "Unable to verify device identity",
-                authenticated: false,
-                observedMacAddress,
-                observedIpAddress
-            });
-        }
-
-        if (!device) {
-            return respondWithAuditedDecision({
-                res,
-                statusCode: 401,
-                did,
-                decision: "DENIED",
-                auditReason: AUDIT_REASONS.UNKNOWN_DEVICE,
-                clientReason: "Invalid authentication proof",
-                authenticated: false,
-                observedMacAddress,
-                observedIpAddress
-            });
-        }
-
-        const status = String(device.status || "").toUpperCase();
-
-        if (status !== "ACTIVE") {
-            return respondWithAuditedDecision({
-                res,
-                statusCode: 403,
-                did,
-                decision: "DENIED",
-                auditReason: AUDIT_REASONS.DEVICE_NOT_ACTIVE,
-                clientReason: "Device is not active",
-                authenticated: false,
-                observedMacAddress,
-                observedIpAddress
-            });
-        }
-
-        if (
-            typeof device.publicKey !== "string" ||
-            device.publicKey.trim() === ""
-        ) {
-            console.warn(
-                "Authentication denied because the Fabric device record has no usable public key",
-                {
-                    did,
-                    challengeId
-                }
-            );
-
-            return respondWithAuditedDecision({
-                res,
-                statusCode: 401,
-                did,
-                decision: "DENIED",
-                auditReason: AUDIT_REASONS.PUBLIC_KEY_UNAVAILABLE,
-                clientReason: "Invalid authentication proof",
-                authenticated: false,
-                observedMacAddress,
-                observedIpAddress
-            });
-        }
-
         const challengePayload = buildChallengePayload(challenge);
-        const signatureValid = verifySignature(
-            device.publicKey,
-            challengePayload,
-            signature
-        );
-
-        if (!signatureValid) {
-            return respondWithAuditedDecision({
-                res,
-                statusCode: 401,
-                did,
-                decision: "DENIED",
-                auditReason: AUDIT_REASONS.INVALID_SIGNATURE,
-                clientReason: "Invalid authentication proof",
-                authenticated: false,
-                observedMacAddress,
-                observedIpAddress
-            });
-        }
 
         let observedNetworkContext;
 
@@ -493,54 +467,93 @@ async function verifyAuthenticationChallenge(req, res, next) {
             });
         }
 
-        const spoofingResult = evaluateSpoofing(
-            device,
-            observedNetworkContext
-        );
+        let candidateSpoofingClassification =
+            DEFAULT_SPOOFING_CLASSIFICATION;
+        let spoofingCheckDurationMs = null;
 
-        if (
-            spoofingResult.detected ||
-            spoofingResult.deniedForIncompleteContext
-        ) {
-            const reason = spoofingResult.detected
-                ? spoofingResult.classification
-                : AUDIT_REASONS.CONTEXT_INCOMPLETE;
+        try {
+            const device = await getRegisteredDevice(did);
+
+            if (device) {
+                const spoofingResult = evaluateSpoofing(
+                    device,
+                    observedNetworkContext
+                );
+
+                candidateSpoofingClassification =
+                    spoofingResult.classification;
+                spoofingCheckDurationMs =
+                    spoofingResult.comparisonTimeMs;
+                observedMacAddress =
+                    spoofingResult.observedMacAddress || "";
+                observedIpAddress =
+                    spoofingResult.observedIpAddress || "";
+            }
+        } catch (error) {
+            console.error(
+                "Identity registry query failed during network-context classification:",
+                {
+                    message: error.message,
+                    code: error.code,
+                    details: error.details
+                }
+            );
 
             return respondWithAuditedDecision({
                 res,
-                statusCode: 403,
+                statusCode: 502,
                 did,
                 decision: "DENIED",
-                auditReason: reason,
-                clientReason: spoofingResult.detected
-                    ? "Network context mismatch detected"
-                    : "Network context incomplete",
+                auditReason: AUDIT_REASONS.INTERNAL_VERIFICATION_ERROR,
+                clientReason: "Unable to evaluate network context",
                 authenticated: false,
-                observedMacAddress:
-                    spoofingResult.observedMacAddress || "",
-                observedIpAddress:
-                    spoofingResult.observedIpAddress || "",
-                spoofingClassification: spoofingResult.classification,
-                spoofingCheckDurationMs:
-                    spoofingResult.comparisonTimeMs
+                observedMacAddress,
+                observedIpAddress
             });
         }
 
-        return respondWithAuditedDecision({
-            res,
-            statusCode: 200,
+        let contractResult;
+
+        try {
+            contractResult = await verifyAuthentication({
+                eventId: crypto.randomUUID(),
+                did,
+                challengePayload,
+                signatureBase64: signature,
+                observedMacAddress,
+                observedIpAddress,
+                spoofingClassification: candidateSpoofingClassification,
+                denyIncompleteNetworkContext:
+                    spoofingConfig.denyIncompleteNetworkContext
+            });
+        } catch (error) {
+            console.error(
+                "AccessControl VerifyAuthentication transaction failed:",
+                {
+                    did,
+                    challengeId,
+                    message: error.message,
+                    code: error.code,
+                    details: error.details
+                }
+            );
+
+            return res.status(502).json({
+                success: false,
+                authenticated: false,
+                decision: "DENIED",
+                reason: "Unable to verify device identity"
+            });
+        }
+
+        const statusCode = getHttpStatusForContractDecision(contractResult);
+        const body = buildContractResponseBody({
             did,
-            decision: "GRANTED",
-            auditReason: AUDIT_REASONS.VALID_SIGNATURE,
-            authenticated: true,
-            observedMacAddress:
-                spoofingResult.observedMacAddress || "",
-            observedIpAddress:
-                spoofingResult.observedIpAddress || "",
-            spoofingClassification: spoofingResult.classification,
-            spoofingCheckDurationMs:
-                spoofingResult.comparisonTimeMs
+            contractResult,
+            spoofingCheckDurationMs
         });
+
+        return res.status(statusCode).json(body);
     } catch (error) {
         next(error);
     }

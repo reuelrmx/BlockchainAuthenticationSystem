@@ -41,6 +41,30 @@ async function recordAuthenticationEvent({
     );
 }
 
+async function verifyAuthentication({
+    eventId = crypto.randomUUID(),
+    did,
+    challengePayload,
+    signatureBase64,
+    observedMacAddress,
+    observedIpAddress,
+    spoofingClassification = DEFAULT_SPOOFING_CLASSIFICATION,
+    denyIncompleteNetworkContext = false
+}) {
+    return submitTransactionForContract(
+        fabricConfig.accessControlContractName,
+        "VerifyAuthentication",
+        eventId,
+        did,
+        challengePayload,
+        signatureBase64,
+        normalizeOptionalValue(observedMacAddress),
+        normalizeOptionalValue(observedIpAddress),
+        spoofingClassification,
+        String(Boolean(denyIncompleteNetworkContext))
+    );
+}
+
 async function getAuthenticationEvent(eventId) {
     return evaluateTransactionForContract(
         fabricConfig.accessControlContractName,
@@ -67,6 +91,7 @@ async function getAuthenticationEventsByDevice(did) {
 module.exports = {
     DEFAULT_SPOOFING_CLASSIFICATION,
     recordAuthenticationEvent,
+    verifyAuthentication,
     getAuthenticationEvent,
     getAllAuthenticationEvents,
     getAuthenticationEventsByDevice
