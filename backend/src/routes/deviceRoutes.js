@@ -10,14 +10,26 @@ const {
     activateDevice,
     revokeDevice
 } = require("../controllers/deviceController");
+const {
+    requireAdminAuthentication,
+    requireAdminRole
+} = require("../middleware/adminAuth");
 
 const router = express.Router();
+const canView = [
+    requireAdminAuthentication,
+    requireAdminRole("ADMIN", "VIEWER")
+];
+const canManage = [
+    requireAdminAuthentication,
+    requireAdminRole("ADMIN")
+];
 
-router.get("/", getAllDevices);
-router.get("/:did", getDevice);
 router.post("/register", registerDevice);
-router.patch("/:did/suspend", suspendDevice);
-router.patch("/:did/activate", activateDevice);
-router.patch("/:did/revoke", revokeDevice);
+router.get("/", canView, getAllDevices);
+router.get("/:did", canView, getDevice);
+router.patch("/:did/suspend", canManage, suspendDevice);
+router.patch("/:did/activate", canManage, activateDevice);
+router.patch("/:did/revoke", canManage, revokeDevice);
 
 module.exports = router;

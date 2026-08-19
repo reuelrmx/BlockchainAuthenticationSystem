@@ -11,6 +11,12 @@ __pycache__/
 .env
 *.log
 
+# Local backend admin store and TLS material
+backend/data/*.json
+!backend/data/.gitkeep
+backend/certs/*
+!backend/certs/.gitkeep
+
 # Generated attack simulation output
 attacks/results/*.json
 !attacks/results/.gitkeep

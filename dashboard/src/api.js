@@ -15,6 +15,7 @@ class ApiError extends Error {
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_BASE_URL}${path}`, {
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       ...(options.headers || {})
@@ -42,6 +43,26 @@ async function request(path, options = {}) {
 
 export function getHealth() {
   return request("/api/health");
+}
+
+export function loginAdmin(username, password) {
+  return request("/api/admin/login", {
+    method: "POST",
+    body: JSON.stringify({
+      username,
+      password
+    })
+  });
+}
+
+export function logoutAdmin() {
+  return request("/api/admin/logout", {
+    method: "POST"
+  });
+}
+
+export function getCurrentAdmin() {
+  return request("/api/admin/me");
 }
 
 export function getDevices() {

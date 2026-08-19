@@ -1,4 +1,5 @@
-import { createServer } from "node:http";
+import { createServer as createHttpServer } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +17,13 @@ const distDir = path.join(projectRoot, "dist");
 const port = Number(process.env.DASHBOARD_PORT || 5173);
 const host = process.env.DASHBOARD_HOST || "0.0.0.0";
 const watchEnabled = !process.argv.includes("--no-watch");
+const httpsEnabled = process.env.DASHBOARD_HTTPS_ENABLED === "true";
+const tlsCertPath = process.env.DASHBOARD_TLS_CERT_PATH
+  ? path.resolve(projectRoot, process.env.DASHBOARD_TLS_CERT_PATH)
+  : "";
+const tlsKeyPath = process.env.DASHBOARD_TLS_KEY_PATH
+  ? path.resolve(projectRoot, process.env.DASHBOARD_TLS_KEY_PATH)
+  : "";
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -69,7 +77,7 @@ async function startServer() {
     await esbuild.build(buildOptions);
   }
 
-  const server = createServer(async (request, response) => {
+  const requestHandler = async (request, response) => {
     const requestPath = resolveRequestPath(request.url || "/");
     const filePath = await readResponseFile(requestPath);
     const extension = path.extname(filePath);
@@ -88,10 +96,18 @@ async function startServer() {
       });
       response.end("Not found");
     }
-  });
+  };
+  const server = httpsEnabled
+    ? createHttpsServer({
+      cert: await readFile(tlsCertPath),
+      key: await readFile(tlsKeyPath)
+    }, requestHandler)
+    : createHttpServer(requestHandler);
 
   server.listen(port, host, () => {
-    console.log(`Dashboard running at http://localhost:${port}`);
+    const protocol = httpsEnabled ? "https" : "http";
+
+    console.log(`Dashboard running at ${protocol}://localhost:${port}`);
   });
 }
 

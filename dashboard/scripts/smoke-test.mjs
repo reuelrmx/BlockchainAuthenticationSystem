@@ -1,8 +1,18 @@
 import { spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 const chromeBin = process.env.CHROME_BIN || "chromium";
 const dashboardUrl = process.env.DASHBOARD_URL || "http://localhost:5173/";
 const remotePort = Number(process.env.CHROME_REMOTE_PORT || 9337);
+const dashboardAdminUsername = process.env.DASHBOARD_ADMIN_USERNAME || "";
+const dashboardAdminPassword = process.env.DASHBOARD_ADMIN_PASSWORD || "";
+const dashboardExpectedRole = (
+  process.env.DASHBOARD_EXPECT_ROLE || "ADMIN"
+).toUpperCase();
+const ignoreCertificateErrors =
+  process.env.CHROME_IGNORE_CERT_ERRORS === "true";
 const suspendTestDid = process.env.SUSPEND_TEST_DID ||
   "did:fabric:6074c200-b69f-4950-b592-fdf9d60330a1";
 const statusChangeReason = "Phase 7 dashboard smoke test";
@@ -219,6 +229,29 @@ async function setSearch(client, placeholderText, value) {
   }
 }
 
+async function setInputByName(client, name, value) {
+  const updated = await client.evaluate(`
+    (() => {
+      const input = document.querySelector(
+        ${JSON.stringify(`input[name="${name}"]`)}
+      );
+
+      if (!input) return false;
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value"
+      ).set;
+      setter.call(input, ${JSON.stringify(value)});
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      return true;
+    })()
+  `);
+
+  if (!updated) {
+    throw new Error(`Input not found: ${name}`);
+  }
+}
+
 async function setSelectByIndex(client, index, value) {
   const updated = await client.evaluate(`
     (() => {
@@ -257,6 +290,31 @@ async function fillReason(client, reason) {
   }
 }
 
+async function loginIfNeeded(client) {
+  const needsLogin = await client.evaluate(
+    `Boolean(document.querySelector("input[name='username']"))`
+  );
+
+  if (!needsLogin) {
+    return;
+  }
+
+  if (!dashboardAdminUsername || !dashboardAdminPassword) {
+    throw new Error(
+      "Dashboard login requires DASHBOARD_ADMIN_USERNAME and DASHBOARD_ADMIN_PASSWORD"
+    );
+  }
+
+  await setInputByName(client, "username", dashboardAdminUsername);
+  await setInputByName(client, "password", dashboardAdminPassword);
+  await clickButton(client, "Sign in");
+  await waitForCondition(
+    client,
+    `document.body.innerText.includes("Total Devices")`,
+    "authenticated overview statistics"
+  );
+}
+
 async function runChecks(client) {
   await client.send("Runtime.enable");
   await client.send("Page.enable");
@@ -267,12 +325,20 @@ async function runChecks(client) {
 
   await waitForCondition(
     client,
+    `document.body.innerText.includes("Total Devices") ||
+      document.querySelector("input[name='username']")`,
+    "dashboard or login view"
+  );
+  await loginIfNeeded(client);
+  await waitForCondition(
+    client,
     `document.body.innerText.includes("Total Devices")`,
     "overview statistics"
   );
 
   const overview = await client.evaluate(`
     (() => ({
+      adminRoleShown: document.body.innerText.includes(${JSON.stringify(dashboardExpectedRole)}),
       hasHealth: document.body.innerText.includes("Fabric") &&
         document.body.innerText.includes("connected"),
       totalDevicesText: [...document.querySelectorAll(".stat-card")]
@@ -316,43 +382,61 @@ async function runChecks(client) {
   );
   await clickCloseDetails(client);
 
-  await clickButton(client, "Devices");
-  await setSearch(client, "DID", suspendTestDid);
-  await waitForCondition(
-    client,
-    `document.body.innerText.includes("Phase 3 Suspend Test Device")`,
-    "suspend-test device row"
-  );
+  if (dashboardExpectedRole === "ADMIN") {
+    await clickButton(client, "Devices");
+    await setSearch(client, "DID", suspendTestDid);
+    await waitForCondition(
+      client,
+      `document.body.innerText.includes("Phase 3 Suspend Test Device")`,
+      "suspend-test device row"
+    );
 
-  await clickButton(client, "Suspend");
-  await waitForCondition(
-    client,
-    `document.body.innerText.includes("Suspend Device") &&
-      document.querySelector("textarea")`,
-    "suspend dialog"
-  );
-  await fillReason(client, statusChangeReason);
-  await clickButton(client, "Suspend Device");
-  await waitForCondition(
-    client,
-    `document.body.innerText.includes("SUSPENDED") &&
-      document.body.innerText.includes("Activate")`,
-    "suspended status"
-  );
+    await clickButton(client, "Suspend");
+    await waitForCondition(
+      client,
+      `document.body.innerText.includes("Suspend Device") &&
+        document.querySelector("textarea")`,
+      "suspend dialog"
+    );
+    await fillReason(client, statusChangeReason);
+    await clickButton(client, "Suspend Device");
+    await waitForCondition(
+      client,
+      `document.body.innerText.includes("SUSPENDED") &&
+        document.body.innerText.includes("Activate")`,
+      "suspended status"
+    );
 
-  await clickButton(client, "Activate");
-  await waitForCondition(
-    client,
-    `document.body.innerText.includes("Activate Device")`,
-    "activate dialog"
-  );
-  await clickButton(client, "Activate Device");
-  await waitForCondition(
-    client,
-    `document.body.innerText.includes("ACTIVE") &&
-      document.body.innerText.includes("Suspend")`,
-    "active status restoration"
-  );
+    await clickButton(client, "Activate");
+    await waitForCondition(
+      client,
+      `document.body.innerText.includes("Activate Device")`,
+      "activate dialog"
+    );
+    await clickButton(client, "Activate Device");
+    await waitForCondition(
+      client,
+      `document.body.innerText.includes("ACTIVE") &&
+        document.body.innerText.includes("Suspend")`,
+      "active status restoration"
+    );
+  } else {
+    const privilegedButtons = await client.evaluate(`
+      [...document.querySelectorAll("button")]
+        .map((button) => button.textContent.trim())
+        .filter((text) =>
+          text === "Suspend" ||
+          text === "Activate" ||
+          text === "Revoke"
+        )
+    `);
+
+    if (privilegedButtons.length > 0) {
+      throw new Error(
+        `Viewer role can see privileged buttons: ${privilegedButtons.join(", ")}`
+      );
+    }
+  }
 
   await clickButton(client, "Authentication Audit");
   await waitForCondition(
@@ -383,8 +467,10 @@ async function runChecks(client) {
 
   const alerts = await client.evaluate(`
     (() => {
-      const classifications = [...document.querySelectorAll("[class*='spoofing-']")]
-        .map((item) => item.textContent.trim());
+      const classifications = [...new Set(
+        [...document.querySelectorAll("[class*='spoofing-']")]
+          .map((item) => item.textContent.trim())
+      )];
 
       return {
         alertRows: document.querySelectorAll("tbody tr").length,
@@ -401,13 +487,23 @@ async function runChecks(client) {
 }
 
 async function main() {
-  const chrome = spawn(chromeBin, [
+  const configuredUserDataDir = process.env.CHROME_USER_DATA_DIR || "";
+  const userDataDir = configuredUserDataDir ||
+    await mkdtemp(path.join(tmpdir(), "dashboard-smoke-"));
+  const chromeArgs = [
     "--headless=new",
     "--disable-gpu",
     "--no-sandbox",
+    `--user-data-dir=${userDataDir}`,
     `--remote-debugging-port=${remotePort}`,
     dashboardUrl
-  ], {
+  ];
+
+  if (ignoreCertificateErrors) {
+    chromeArgs.splice(3, 0, "--ignore-certificate-errors");
+  }
+
+  const chrome = spawn(chromeBin, chromeArgs, {
     stdio: ["ignore", "ignore", "pipe"]
   });
   let chromeErrors = "";
@@ -456,6 +552,17 @@ async function main() {
     }
   } finally {
     chrome.kill("SIGTERM");
+
+    if (!configuredUserDataDir) {
+      try {
+        await rm(userDataDir, {
+          recursive: true,
+          force: true
+        });
+      } catch {
+        // Chrome can keep transient profile handles alive briefly.
+      }
+    }
   }
 
   if (chromeErrors.includes("CONSOLE")) {

@@ -7,11 +7,19 @@ const {
     getAuthenticationEventById,
     getDeviceAuthenticationEvents
 } = require("../controllers/auditController");
+const {
+    requireAdminAuthentication,
+    requireAdminRole
+} = require("../middleware/adminAuth");
 
 const router = express.Router();
+const canView = [
+    requireAdminAuthentication,
+    requireAdminRole("ADMIN", "VIEWER")
+];
 
-router.get("/authentication", getAuthenticationEvents);
-router.get("/authentication/:eventId", getAuthenticationEventById);
-router.get("/devices/:did/authentication", getDeviceAuthenticationEvents);
+router.get("/authentication", canView, getAuthenticationEvents);
+router.get("/authentication/:eventId", canView, getAuthenticationEventById);
+router.get("/devices/:did/authentication", canView, getDeviceAuthenticationEvents);
 
 module.exports = router;

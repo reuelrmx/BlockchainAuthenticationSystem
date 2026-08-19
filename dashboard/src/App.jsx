@@ -10,6 +10,8 @@ import {
   FileText,
   Gauge,
   Lock,
+  LogIn,
+  LogOut,
   Network,
   RefreshCw,
   RotateCcw,
@@ -17,15 +19,19 @@ import {
   ShieldAlert,
   ShieldCheck,
   Smartphone,
+  UserCircle,
   X
 } from "lucide-react";
 
 import {
   API_BASE_URL,
   activateDevice,
+  getCurrentAdmin,
   getAuthenticationEvents,
   getDevices,
   getHealth,
+  loginAdmin,
+  logoutAdmin,
   revokeDevice,
   suspendDevice
 } from "./api";
@@ -383,8 +389,12 @@ function Overview({ health, errors, stats, events }) {
   );
 }
 
-function DeviceActions({ device, onAction }) {
+function DeviceActions({ device, onAction, canManage }) {
   const status = getDeviceStatus(device);
+
+  if (!canManage) {
+    return <span className="muted">View only</span>;
+  }
 
   if (status === "REVOKED") {
     return <span className="muted">No actions</span>;
@@ -436,6 +446,7 @@ function DevicesView({
   setDeviceStatusFilter,
   selectedDevice,
   setSelectedDevice,
+  canManageDevices,
   onAction
 }) {
   const filteredDevices = useMemo(() => {
@@ -521,7 +532,11 @@ function DevicesView({
                           <Eye size={17} aria-hidden="true" />
                           <span className="sr-only">View details</span>
                         </button>
-                        <DeviceActions device={device} onAction={onAction} />
+                        <DeviceActions
+                          device={device}
+                          onAction={onAction}
+                          canManage={canManageDevices}
+                        />
                       </div>
                     </td>
                   </tr>
@@ -536,6 +551,7 @@ function DevicesView({
         <DeviceDetails
           device={selectedDevice}
           onClose={() => setSelectedDevice(null)}
+          canManageDevices={canManageDevices}
           onAction={onAction}
         />
       ) : null}
@@ -552,7 +568,7 @@ function DetailItem({ label, value }) {
   );
 }
 
-function DeviceDetails({ device, onClose, onAction }) {
+function DeviceDetails({ device, onClose, canManageDevices, onAction }) {
   return (
     <section className="panel details-panel">
       <div className="panel-heading">
@@ -591,7 +607,11 @@ function DeviceDetails({ device, onClose, onAction }) {
         <pre>{valueOrDash(device.publicKey)}</pre>
       </div>
       <div className="details-actions">
-        <DeviceActions device={device} onAction={onAction} />
+        <DeviceActions
+          device={device}
+          onAction={onAction}
+          canManage={canManageDevices}
+        />
       </div>
     </section>
   );
@@ -862,7 +882,78 @@ function ActionModal({
   );
 }
 
+function LoginView({ busy, error, onLogin }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    onLogin(username, password);
+  }
+
+  return (
+    <main className="login-shell">
+      <form className="login-panel" onSubmit={handleSubmit}>
+        <div className="login-brand">
+          <div className="brand-mark">
+            <ShieldCheck size={26} aria-hidden="true" />
+          </div>
+          <div>
+            <p className="eyebrow">Administrator Login</p>
+            <h1>Blockchain Authentication Console</h1>
+          </div>
+        </div>
+
+        <label className="login-field">
+          <span>Username</span>
+          <input
+            autoComplete="username"
+            name="username"
+            onChange={(event) => setUsername(event.target.value)}
+            required
+            type="text"
+            value={username}
+          />
+        </label>
+
+        <label className="login-field">
+          <span>Password</span>
+          <input
+            autoComplete="current-password"
+            name="password"
+            onChange={(event) => setPassword(event.target.value)}
+            required
+            type="password"
+            value={password}
+          />
+        </label>
+
+        {error ? <ErrorState message={error} /> : null}
+
+        <button
+          className="button login-button"
+          disabled={busy}
+          type="submit"
+        >
+          <LogIn size={17} aria-hidden="true" />
+          {busy ? "Signing in" : "Sign in"}
+        </button>
+
+        <p className="login-api">{API_BASE_URL}</p>
+      </form>
+    </main>
+  );
+}
+
+function isUnauthorizedResult(result) {
+  return result.status === "rejected" && result.reason?.status === 401;
+}
+
 function App() {
+  const [admin, setAdmin] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [loginBusy, setLoginBusy] = useState(false);
   const [activeView, setActiveView] = useState("overview");
   const [health, setHealth] = useState(null);
   const [devices, setDevices] = useState(null);
@@ -893,6 +984,21 @@ function App() {
         getAuthenticationEvents()
       ]);
     const nextErrors = {};
+
+    if (
+      isUnauthorizedResult(devicesResult) ||
+      isUnauthorizedResult(auditResult)
+    ) {
+      setAdmin(null);
+      setAuthError("Your administrator session has expired");
+      setHealth(null);
+      setDevices(null);
+      setEvents(null);
+      setSelectedDevice(null);
+      setLoading(false);
+      setRefreshing(false);
+      return;
+    }
 
     if (healthResult.status === "fulfilled") {
       setHealth(healthResult.value);
@@ -931,22 +1037,60 @@ function App() {
   }, []);
 
   useEffect(() => {
-    refreshData();
-  }, [refreshData]);
+    let active = true;
+
+    async function checkCurrentAdmin() {
+      try {
+        const currentAdmin = await getCurrentAdmin();
+
+        if (active) {
+          setAdmin(currentAdmin.data.admin);
+          setAuthError("");
+        }
+      } catch (error) {
+        if (active && error.status !== 401) {
+          setAuthError(error.message);
+        }
+      } finally {
+        if (active) {
+          setAuthChecked(true);
+          setLoading(false);
+        }
+      }
+    }
+
+    checkCurrentAdmin();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (admin) {
+      setLoading(true);
+      refreshData();
+    }
+  }, [admin, refreshData]);
 
   const stats = useMemo(
     () => calculateStats(devices, events),
     [devices, events]
   );
+  const canManageDevices = admin?.role === "ADMIN";
 
   function openAction(device, action) {
+    if (!canManageDevices) {
+      return;
+    }
+
     setActionState({ device, action });
     setActionReason("");
     setActionError("");
   }
 
   async function confirmAction() {
-    if (!actionState) {
+    if (!actionState || !canManageDevices) {
       return;
     }
 
@@ -975,8 +1119,62 @@ function App() {
     }
   }
 
+  async function handleLogin(username, password) {
+    setLoginBusy(true);
+    setAuthError("");
+
+    try {
+      const result = await loginAdmin(username.trim(), password);
+
+      setAdmin(result.data.admin);
+    } catch (error) {
+      setAuthError(error.message);
+    } finally {
+      setLoginBusy(false);
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await logoutAdmin();
+    } catch {
+      // The local dashboard state should clear even if the network drops.
+    }
+
+    setAdmin(null);
+    setHealth(null);
+    setDevices(null);
+    setEvents(null);
+    setErrors({});
+    setSelectedDevice(null);
+    setActionState(null);
+    setLastRefreshed(null);
+    setLoading(false);
+  }
+
   const ActiveIcon = NAV_ITEMS.find((item) => item.id === activeView)?.icon ||
     Gauge;
+
+  if (!authChecked) {
+    return (
+      <main className="login-shell">
+        <div className="loading-panel auth-loading">
+          <RefreshCw size={24} aria-hidden="true" className="spin" />
+          <span>Checking administrator session</span>
+        </div>
+      </main>
+    );
+  }
+
+  if (!admin) {
+    return (
+      <LoginView
+        busy={loginBusy}
+        error={authError}
+        onLogin={handleLogin}
+      />
+    );
+  }
 
   return (
     <div className="app-shell">
@@ -1025,6 +1223,11 @@ function App() {
             </h1>
           </div>
           <div className="topbar-actions">
+            <span className="admin-pill">
+              <UserCircle size={16} aria-hidden="true" />
+              {admin.username}
+              <strong>{admin.role}</strong>
+            </span>
             {lastRefreshed ? (
               <span className="last-refresh">
                 Last refresh {lastRefreshed.toLocaleTimeString()}
@@ -1043,6 +1246,15 @@ function App() {
                 className={refreshing ? "spin" : ""}
               />
               {refreshing ? "Refreshing" : "Refresh"}
+            </button>
+            <button
+              className="button button-muted"
+              onClick={handleLogout}
+              title="Sign out"
+              type="button"
+            >
+              <LogOut size={17} aria-hidden="true" />
+              Sign out
             </button>
           </div>
         </header>
@@ -1073,6 +1285,7 @@ function App() {
             setDeviceStatusFilter={setDeviceStatusFilter}
             selectedDevice={selectedDevice}
             setSelectedDevice={setSelectedDevice}
+            canManageDevices={canManageDevices}
             onAction={openAction}
           />
         ) : null}

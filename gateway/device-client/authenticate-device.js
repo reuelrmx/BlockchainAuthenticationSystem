@@ -2,6 +2,8 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
+const http = require("node:http");
+const https = require("node:https");
 const path = require("node:path");
 
 const DEFAULT_API_URL = "http://localhost:3000";
@@ -76,32 +78,105 @@ function resolveDeviceDirectory(deviceDirectory) {
     );
 }
 
-async function requestChallenge(apiUrl, did) {
-    const response = await fetch(
-        `${apiUrl}/api/auth/challenge`,
+function normalizeApiUrl(apiUrl) {
+    return String(apiUrl || DEFAULT_API_URL).replace(/\/$/, "");
+}
+
+async function readTrustedCa(caPath) {
+    if (!caPath) {
+        return null;
+    }
+
+    return readRequiredFile(
+        path.resolve(process.cwd(), caPath),
+        "TLS CA certificate"
+    );
+}
+
+function requestJson(apiUrl, routePath, options, tlsOptions = {}) {
+    const url = new URL(routePath, `${normalizeApiUrl(apiUrl)}/`);
+    const transport = url.protocol === "https:" ? https : http;
+    const body = options.body ? Buffer.from(options.body) : null;
+    const headers = {
+        ...(options.headers || {})
+    };
+
+    if (body) {
+        headers["Content-Length"] = String(body.length);
+    }
+
+    return new Promise((resolve, reject) => {
+        const requestOptions = {
+            method: options.method,
+            headers
+        };
+
+        if (url.protocol === "https:" && tlsOptions.ca) {
+            requestOptions.ca = tlsOptions.ca;
+        }
+
+        const request = transport.request(
+            url,
+            requestOptions,
+            (response) => {
+                const chunks = [];
+
+                response.on("data", (chunk) => {
+                    chunks.push(chunk);
+                });
+
+                response.on("end", () => {
+                    const responseText = Buffer.concat(chunks)
+                        .toString("utf8");
+
+                    try {
+                        resolve({
+                            statusCode: response.statusCode,
+                            ok: response.statusCode >= 200 &&
+                                response.statusCode < 300,
+                            body: JSON.parse(responseText)
+                        });
+                    } catch {
+                        reject(new Error(
+                            `Gateway returned a non-JSON response with status ${response.statusCode}`
+                        ));
+                    }
+                });
+            }
+        );
+
+        request.on("error", (error) => {
+            reject(error);
+        });
+
+        if (body) {
+            request.write(body);
+        }
+
+        request.end();
+    });
+}
+
+async function requestChallenge(apiUrl, did, tlsOptions) {
+    const response = await requestJson(
+        apiUrl,
+        "/api/auth/challenge",
         {
             method: "POST",
             headers: {
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({ did })
-        }
+        },
+        tlsOptions
     );
 
-    let body;
-
-    try {
-        body = await response.json();
-    } catch {
-        throw new Error(
-            `Gateway returned a non-JSON response with status ${response.status}`
-        );
-    }
+    const body = response.body;
 
     if (!response.ok || !body.success) {
         throw new Error(
             body.message ||
-            `Challenge request failed with status ${response.status}`
+            `Challenge request failed with status ${response.statusCode}`
         );
     }
 
@@ -197,7 +272,12 @@ function signChallengePayload(privateKey, challengePayload) {
     }
 }
 
-async function submitVerification(apiUrl, proof, simulationContext) {
+async function submitVerification(
+    apiUrl,
+    proof,
+    simulationContext,
+    tlsOptions
+) {
     const headers = {
         "Content-Type": "application/json"
     };
@@ -212,24 +292,17 @@ async function submitVerification(apiUrl, proof, simulationContext) {
             simulationContext.simulatedMacAddress;
     }
 
-    const response = await fetch(
-        `${apiUrl}/api/auth/verify`,
+    const response = await requestJson(
+        apiUrl,
+        "/api/auth/verify",
         {
             method: "POST",
             headers,
             body: JSON.stringify(proof)
-        }
+        },
+        tlsOptions
     );
-
-    let body;
-
-    try {
-        body = await response.json();
-    } catch {
-        throw new Error(
-            `Gateway returned a non-JSON verification response with status ${response.status}`
-        );
-    }
+    const body = response.body;
 
     if (
         body.decision !== "GRANTED" &&
@@ -249,7 +322,7 @@ async function submitVerification(apiUrl, proof, simulationContext) {
     }
 
     return {
-        statusCode: response.status,
+        statusCode: response.statusCode,
         body
     };
 }
@@ -260,6 +333,10 @@ async function main() {
         getArgument("api") ||
         process.env.GATEWAY_API_URL ||
         DEFAULT_API_URL;
+    const trustedCa = await readTrustedCa(
+        getArgument("ca") ||
+        process.env.GATEWAY_TLS_CA_PATH
+    );
     const simulationContext = {
         simulatedIpAddress: getArgument("simulate-ip"),
         simulatedMacAddress: getArgument("simulate-mac")
@@ -276,7 +353,9 @@ async function main() {
         "private-key.pem"
     );
 
-    const challengeBody = await requestChallenge(apiUrl, did);
+    const challengeBody = await requestChallenge(apiUrl, did, {
+        ca: trustedCa
+    });
     const challenge = validateChallengeResponse(challengeBody, did);
     const signature = signChallengePayload(
         privateKey,
@@ -296,7 +375,10 @@ async function main() {
     const verification = await submitVerification(
         apiUrl,
         verificationRequest,
-        simulationContext
+        simulationContext,
+        {
+            ca: trustedCa
+        }
     );
 
     const output = {
