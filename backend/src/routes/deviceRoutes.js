@@ -25,7 +25,7 @@ const canManage = [
     requireAdminRole("ADMIN")
 ];
 
-router.post("/register", registerDevice);
+router.post("/register", canManage, registerDevice);
 router.get("/", canView, getAllDevices);
 router.get("/:did", canView, getDevice);
 router.patch("/:did/suspend", canManage, suspendDevice);
