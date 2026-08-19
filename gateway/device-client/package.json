@@ -1,13 +1,14 @@
 {
   "name": "blockchain-auth-device-client",
   "version": "1.0.0",
-  "description": "Device-side identity and authentication client",
-  "main": "register-device.js",
+  "description": "Device-side enrollment and blockchain authentication client",
+  "main": "authenticate-device.js",
   "scripts": {
-    "register": "node register-device.js",
+    "prepare-enrollment": "node register-device.js",
+    "assign-did": "node assign-did.js",
     "authenticate": "node authenticate-device.js",
     "test-signature": "node test-signature.js",
-    "check": "node --check register-device.js && node --check authenticate-device.js && node --check test-signature.js"
+    "check": "node --check register-device.js && node --check assign-did.js && node --check authenticate-device.js && node --check test-signature.js"
   },
   "author": "Ruel Mumba",
   "license": "MIT"
