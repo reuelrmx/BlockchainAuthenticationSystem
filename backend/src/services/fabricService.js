@@ -15,7 +15,8 @@ const fabricConfig = require("../config/fabricConfig");
 
 let grpcClient = null;
 let gateway = null;
-let contract = null;
+let network = null;
+const contracts = new Map();
 
 /**
  * Finds the first regular file in a directory.
@@ -63,8 +64,8 @@ async function requireFile(filePath, description) {
  * Creates one reusable Fabric Gateway connection.
  */
 async function connectToFabric() {
-    if (contract) {
-        return contract;
+    if (network) {
+        return getContract(fabricConfig.contractName);
     }
 
     await requireFile(
@@ -131,13 +132,8 @@ async function connectToFabric() {
         })
     });
 
-    const network = gateway.getNetwork(
+    network = gateway.getNetwork(
         fabricConfig.channelName
-    );
-
-    contract = network.getContract(
-        fabricConfig.chaincodeName,
-        fabricConfig.contractName
     );
 
     console.log(
@@ -145,7 +141,25 @@ async function connectToFabric() {
         `chaincode '${fabricConfig.chaincodeName}'`
     );
 
-    return contract;
+    return getContract(fabricConfig.contractName);
+}
+
+async function getContract(contractName = fabricConfig.contractName) {
+    if (!network) {
+        await connectToFabric();
+    }
+
+    if (!contracts.has(contractName)) {
+        contracts.set(
+            contractName,
+            network.getContract(
+                fabricConfig.chaincodeName,
+                contractName
+            )
+        );
+    }
+
+    return contracts.get(contractName);
 }
 
 /**
@@ -156,7 +170,27 @@ async function connectToFabric() {
  * @returns {Promise<object|string|null>}
  */
 async function submitTransaction(transactionName, ...args) {
-    const fabricContract = await connectToFabric();
+    return submitTransactionForContract(
+        fabricConfig.contractName,
+        transactionName,
+        ...args
+    );
+}
+
+/**
+ * Submits a transaction against a named contract.
+ *
+ * @param {string} contractName
+ * @param {string} transactionName
+ * @param {...string} args
+ * @returns {Promise<object|string|null>}
+ */
+async function submitTransactionForContract(
+    contractName,
+    transactionName,
+    ...args
+) {
+    const fabricContract = await getContract(contractName);
 
     const resultBytes =
         await fabricContract.submitTransaction(
@@ -175,7 +209,27 @@ async function submitTransaction(transactionName, ...args) {
  * @returns {Promise<object|string|null>}
  */
 async function evaluateTransaction(transactionName, ...args) {
-    const fabricContract = await connectToFabric();
+    return evaluateTransactionForContract(
+        fabricConfig.contractName,
+        transactionName,
+        ...args
+    );
+}
+
+/**
+ * Evaluates a read-only transaction against a named contract.
+ *
+ * @param {string} contractName
+ * @param {string} transactionName
+ * @param {...string} args
+ * @returns {Promise<object|string|null>}
+ */
+async function evaluateTransactionForContract(
+    contractName,
+    transactionName,
+    ...args
+) {
+    const fabricContract = await getContract(contractName);
 
     const resultBytes =
         await fabricContract.evaluateTransaction(
@@ -220,12 +274,16 @@ function closeFabricConnection() {
         grpcClient = null;
     }
 
-    contract = null;
+    network = null;
+    contracts.clear();
 }
 
 module.exports = {
     connectToFabric,
+    getContract,
     submitTransaction,
+    submitTransactionForContract,
     evaluateTransaction,
+    evaluateTransactionForContract,
     closeFabricConnection
 };

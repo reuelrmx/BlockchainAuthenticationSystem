@@ -5,6 +5,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 
+const auditRoutes = require("./routes/auditRoutes");
 const authRoutes = require("./routes/authRoutes");
 const deviceRoutes = require("./routes/deviceRoutes");
 const errorHandler = require("./middleware/errorHandler");
@@ -58,6 +59,7 @@ app.get("/api/health", async (req, res, next) => {
     }
 });
 
+app.use("/api/audit", auditRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/devices", deviceRoutes);
 

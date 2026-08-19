@@ -14,6 +14,35 @@ const {
     verifySignature
 } = require("../services/signatureService");
 
+const {
+    DEFAULT_SPOOFING_CLASSIFICATION,
+    recordAuthenticationEvent
+} = require("../services/auditService");
+
+const {
+    getObservedNetworkContext
+} = require("../services/networkContextService");
+
+const {
+    evaluateSpoofing
+} = require("../services/spoofingService");
+
+const AUDIT_REASONS = {
+    VALID_SIGNATURE: "VALID_SIGNATURE",
+    INVALID_SIGNATURE: "INVALID_SIGNATURE",
+    DEVICE_NOT_ACTIVE: "DEVICE_NOT_ACTIVE",
+    INVALID_CHALLENGE: "INVALID_CHALLENGE",
+    EXPIRED_CHALLENGE: "EXPIRED_CHALLENGE",
+    DID_MISMATCH: "DID_MISMATCH",
+    MAC_MISMATCH: "MAC_MISMATCH",
+    IP_MISMATCH: "IP_MISMATCH",
+    MAC_AND_IP_MISMATCH: "MAC_AND_IP_MISMATCH",
+    CONTEXT_INCOMPLETE: "CONTEXT_INCOMPLETE",
+    UNKNOWN_DEVICE: "UNKNOWN_DEVICE",
+    PUBLIC_KEY_UNAVAILABLE: "PUBLIC_KEY_UNAVAILABLE",
+    INTERNAL_VERIFICATION_ERROR: "INTERNAL_VERIFICATION_ERROR"
+};
+
 function isValidFabricDid(did) {
     return (
         typeof did === "string" &&
@@ -72,13 +101,77 @@ async function getRegisteredDevice(did) {
     }
 }
 
-function denyAuthentication(res, statusCode, reason) {
-    return res.status(statusCode).json({
-        success: false,
-        authenticated: false,
-        decision: "DENIED",
-        reason
-    });
+function getChallengeAuditReason(consumptionReason) {
+    if (consumptionReason === "CHALLENGE_EXPIRED") {
+        return AUDIT_REASONS.EXPIRED_CHALLENGE;
+    }
+
+    return AUDIT_REASONS.INVALID_CHALLENGE;
+}
+
+async function respondWithAuditedDecision({
+    res,
+    statusCode,
+    did,
+    decision,
+    auditReason,
+    clientReason,
+    authenticated,
+    observedMacAddress,
+    observedIpAddress,
+    spoofingClassification = DEFAULT_SPOOFING_CLASSIFICATION,
+    spoofingCheckDurationMs
+}) {
+    let auditEvent;
+
+    try {
+        auditEvent = await recordAuthenticationEvent({
+            did,
+            decision,
+            reason: auditReason,
+            observedMacAddress,
+            observedIpAddress,
+            spoofingClassification
+        });
+    } catch (error) {
+        console.error(
+            "Authentication audit logging failed:",
+            {
+                did,
+                decision,
+                reason: auditReason,
+                message: error.message,
+                code: error.code,
+                details: error.details
+            }
+        );
+
+        return res.status(502).json({
+            success: false,
+            authenticated: false,
+            decision: "DENIED",
+            reason: "Authentication audit logging failed"
+        });
+    }
+
+    const body = {
+        success: authenticated,
+        authenticated,
+        decision,
+        did,
+        auditEventId: auditEvent.eventId,
+        spoofingClassification
+    };
+
+    if (typeof spoofingCheckDurationMs === "number") {
+        body.spoofingCheckDurationMs = spoofingCheckDurationMs;
+    }
+
+    if (!authenticated) {
+        body.reason = clientReason;
+    }
+
+    return res.status(statusCode).json(body);
 }
 
 /**
@@ -170,6 +263,8 @@ async function verifyAuthenticationChallenge(req, res, next) {
         const suppliedDid = req.body?.did;
         const suppliedChallengeId = req.body?.challengeId;
         const suppliedSignature = req.body?.signature;
+        let observedMacAddress = "";
+        let observedIpAddress = "";
 
         if (
             typeof suppliedDid !== "string" ||
@@ -220,11 +315,17 @@ async function verifyAuthenticationChallenge(req, res, next) {
         const consumption = consumeChallenge(challengeId);
 
         if (!consumption.consumed) {
-            return denyAuthentication(
+            return respondWithAuditedDecision({
                 res,
-                401,
-                "Invalid or expired authentication challenge"
-            );
+                statusCode: 401,
+                did,
+                decision: "DENIED",
+                auditReason: getChallengeAuditReason(consumption.reason),
+                clientReason: "Invalid or expired authentication challenge",
+                authenticated: false,
+                observedMacAddress,
+                observedIpAddress
+            });
         }
 
         const challenge = consumption.challenge;
@@ -239,11 +340,17 @@ async function verifyAuthenticationChallenge(req, res, next) {
                 }
             );
 
-            return denyAuthentication(
+            return respondWithAuditedDecision({
                 res,
-                401,
-                "Invalid authentication challenge"
-            );
+                statusCode: 401,
+                did,
+                decision: "DENIED",
+                auditReason: AUDIT_REASONS.DID_MISMATCH,
+                clientReason: "Invalid authentication challenge",
+                authenticated: false,
+                observedMacAddress,
+                observedIpAddress
+            });
         }
 
         let device;
@@ -260,30 +367,47 @@ async function verifyAuthenticationChallenge(req, res, next) {
                 }
             );
 
-            return res.status(502).json({
-                success: false,
-                authenticated: false,
+            return respondWithAuditedDecision({
+                res,
+                statusCode: 502,
+                did,
                 decision: "DENIED",
-                reason: "Unable to verify device identity"
+                auditReason: AUDIT_REASONS.INTERNAL_VERIFICATION_ERROR,
+                clientReason: "Unable to verify device identity",
+                authenticated: false,
+                observedMacAddress,
+                observedIpAddress
             });
         }
 
         if (!device) {
-            return denyAuthentication(
+            return respondWithAuditedDecision({
                 res,
-                401,
-                "Invalid authentication proof"
-            );
+                statusCode: 401,
+                did,
+                decision: "DENIED",
+                auditReason: AUDIT_REASONS.UNKNOWN_DEVICE,
+                clientReason: "Invalid authentication proof",
+                authenticated: false,
+                observedMacAddress,
+                observedIpAddress
+            });
         }
 
         const status = String(device.status || "").toUpperCase();
 
         if (status !== "ACTIVE") {
-            return denyAuthentication(
+            return respondWithAuditedDecision({
                 res,
-                403,
-                "Device is not active"
-            );
+                statusCode: 403,
+                did,
+                decision: "DENIED",
+                auditReason: AUDIT_REASONS.DEVICE_NOT_ACTIVE,
+                clientReason: "Device is not active",
+                authenticated: false,
+                observedMacAddress,
+                observedIpAddress
+            });
         }
 
         if (
@@ -298,11 +422,17 @@ async function verifyAuthenticationChallenge(req, res, next) {
                 }
             );
 
-            return denyAuthentication(
+            return respondWithAuditedDecision({
                 res,
-                401,
-                "Invalid authentication proof"
-            );
+                statusCode: 401,
+                did,
+                decision: "DENIED",
+                auditReason: AUDIT_REASONS.PUBLIC_KEY_UNAVAILABLE,
+                clientReason: "Invalid authentication proof",
+                authenticated: false,
+                observedMacAddress,
+                observedIpAddress
+            });
         }
 
         const challengePayload = buildChallengePayload(challenge);
@@ -313,18 +443,103 @@ async function verifyAuthenticationChallenge(req, res, next) {
         );
 
         if (!signatureValid) {
-            return denyAuthentication(
+            return respondWithAuditedDecision({
                 res,
-                401,
-                "Invalid authentication proof"
-            );
+                statusCode: 401,
+                did,
+                decision: "DENIED",
+                auditReason: AUDIT_REASONS.INVALID_SIGNATURE,
+                clientReason: "Invalid authentication proof",
+                authenticated: false,
+                observedMacAddress,
+                observedIpAddress
+            });
         }
 
-        return res.status(200).json({
-            success: true,
-            authenticated: true,
+        let observedNetworkContext;
+
+        try {
+            observedNetworkContext = await getObservedNetworkContext(req);
+            observedMacAddress =
+                observedNetworkContext.observedMacAddress || "";
+            observedIpAddress =
+                observedNetworkContext.observedIpAddress || "";
+        } catch (error) {
+            if (error.statusCode === 400) {
+                return res.status(400).json({
+                    success: false,
+                    message: error.message
+                });
+            }
+
+            console.error(
+                "Network context extraction failed:",
+                {
+                    did,
+                    message: error.message
+                }
+            );
+
+            return respondWithAuditedDecision({
+                res,
+                statusCode: 502,
+                did,
+                decision: "DENIED",
+                auditReason: AUDIT_REASONS.INTERNAL_VERIFICATION_ERROR,
+                clientReason: "Unable to evaluate network context",
+                authenticated: false,
+                observedMacAddress,
+                observedIpAddress
+            });
+        }
+
+        const spoofingResult = evaluateSpoofing(
+            device,
+            observedNetworkContext
+        );
+
+        if (
+            spoofingResult.detected ||
+            spoofingResult.deniedForIncompleteContext
+        ) {
+            const reason = spoofingResult.detected
+                ? spoofingResult.classification
+                : AUDIT_REASONS.CONTEXT_INCOMPLETE;
+
+            return respondWithAuditedDecision({
+                res,
+                statusCode: 403,
+                did,
+                decision: "DENIED",
+                auditReason: reason,
+                clientReason: spoofingResult.detected
+                    ? "Network context mismatch detected"
+                    : "Network context incomplete",
+                authenticated: false,
+                observedMacAddress:
+                    spoofingResult.observedMacAddress || "",
+                observedIpAddress:
+                    spoofingResult.observedIpAddress || "",
+                spoofingClassification: spoofingResult.classification,
+                spoofingCheckDurationMs:
+                    spoofingResult.comparisonTimeMs
+            });
+        }
+
+        return respondWithAuditedDecision({
+            res,
+            statusCode: 200,
+            did,
             decision: "GRANTED",
-            did
+            auditReason: AUDIT_REASONS.VALID_SIGNATURE,
+            authenticated: true,
+            observedMacAddress:
+                spoofingResult.observedMacAddress || "",
+            observedIpAddress:
+                spoofingResult.observedIpAddress || "",
+            spoofingClassification: spoofingResult.classification,
+            spoofingCheckDurationMs:
+                spoofingResult.comparisonTimeMs
         });
     } catch (error) {
         next(error);

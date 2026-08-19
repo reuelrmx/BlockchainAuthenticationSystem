@@ -22,6 +22,9 @@ module.exports = {
     contractName:
         process.env.FABRIC_CONTRACT_NAME ||
         "IdentityRegistryContract",
+    accessControlContractName:
+        process.env.FABRIC_ACCESS_CONTROL_CONTRACT_NAME ||
+        "AccessControlContract",
     mspId: process.env.FABRIC_MSP_ID || "Org1MSP",
     peerEndpoint:
         process.env.FABRIC_PEER_ENDPOINT || "localhost:7051",

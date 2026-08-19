@@ -197,14 +197,26 @@ function signChallengePayload(privateKey, challengePayload) {
     }
 }
 
-async function submitVerification(apiUrl, proof) {
+async function submitVerification(apiUrl, proof, simulationContext) {
+    const headers = {
+        "Content-Type": "application/json"
+    };
+
+    if (simulationContext.simulatedIpAddress) {
+        headers["X-Simulated-Source-IP"] =
+            simulationContext.simulatedIpAddress;
+    }
+
+    if (simulationContext.simulatedMacAddress) {
+        headers["X-Simulated-Source-MAC"] =
+            simulationContext.simulatedMacAddress;
+    }
+
     const response = await fetch(
         `${apiUrl}/api/auth/verify`,
         {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
+            headers,
             body: JSON.stringify(proof)
         }
     );
@@ -223,6 +235,10 @@ async function submitVerification(apiUrl, proof) {
         body.decision !== "GRANTED" &&
         body.decision !== "DENIED"
     ) {
+        if (!response.ok && body.message) {
+            throw new Error(body.message);
+        }
+
         throw new Error("Verification response is missing a decision");
     }
 
@@ -244,6 +260,10 @@ async function main() {
         getArgument("api") ||
         process.env.GATEWAY_API_URL ||
         DEFAULT_API_URL;
+    const simulationContext = {
+        simulatedIpAddress: getArgument("simulate-ip"),
+        simulatedMacAddress: getArgument("simulate-mac")
+    };
 
     const identityPath = path.join(deviceDirectory, "identity.json");
     const privateKeyPath = path.join(deviceDirectory, "private-key.pem");
@@ -275,7 +295,8 @@ async function main() {
 
     const verification = await submitVerification(
         apiUrl,
-        verificationRequest
+        verificationRequest,
+        simulationContext
     );
 
     const output = {
@@ -288,6 +309,22 @@ async function main() {
         output.reason = verification.body.reason;
     }
 
+    if (verification.body.auditEventId) {
+        output.auditEventId = verification.body.auditEventId;
+    }
+
+    if (verification.body.spoofingClassification) {
+        output.spoofingClassification =
+            verification.body.spoofingClassification;
+    }
+
+    if (
+        typeof verification.body.spoofingCheckDurationMs === "number"
+    ) {
+        output.spoofingCheckDurationMs =
+            verification.body.spoofingCheckDurationMs;
+    }
+
     if (hasFlag("include-payload")) {
         output.challengeId = challenge.challengeId;
         output.expiresAt = challenge.expiresAt;
@@ -296,6 +333,16 @@ async function main() {
         output.algorithm = "ECDSA-SHA256";
         output.challengePayload = challenge.challengePayload;
         output.verificationStatusCode = verification.statusCode;
+
+        if (simulationContext.simulatedIpAddress) {
+            output.simulatedIpAddress =
+                simulationContext.simulatedIpAddress;
+        }
+
+        if (simulationContext.simulatedMacAddress) {
+            output.simulatedMacAddress =
+                simulationContext.simulatedMacAddress;
+        }
     }
 
     console.log(JSON.stringify(output, null, 2));
