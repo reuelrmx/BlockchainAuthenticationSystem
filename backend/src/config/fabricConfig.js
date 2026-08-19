@@ -15,6 +15,45 @@ const org1Path = path.join(
     "org1.example.com"
 );
 
+const org1UsersPath = path.join(
+    org1Path,
+    "users"
+);
+
+function resolveOrg1UserPath(userName) {
+    return path.join(
+        org1UsersPath,
+        userName
+    );
+}
+
+function resolveCertificatePath(userPath) {
+    return path.join(
+        userPath,
+        "msp",
+        "signcerts",
+        "cert.pem"
+    );
+}
+
+function resolvePrivateKeyDirectory(userPath) {
+    return path.join(
+        userPath,
+        "msp",
+        "keystore"
+    );
+}
+
+const applicationUserPath = resolveOrg1UserPath(
+    process.env.FABRIC_APP_USER ||
+    "User1@org1.example.com"
+);
+
+const adminUserPath = resolveOrg1UserPath(
+    process.env.FABRIC_ADMIN_USER ||
+    "Admin@org1.example.com"
+);
+
 module.exports = {
     channelName: process.env.FABRIC_CHANNEL_NAME || "mychannel",
     chaincodeName:
@@ -25,6 +64,9 @@ module.exports = {
     accessControlContractName:
         process.env.FABRIC_ACCESS_CONTROL_CONTRACT_NAME ||
         "AccessControlContract",
+    auditLogContractName:
+        process.env.FABRIC_AUDIT_LOG_CONTRACT_NAME ||
+        "AuditLogContract",
     mspId: process.env.FABRIC_MSP_ID || "Org1MSP",
     peerEndpoint:
         process.env.FABRIC_PEER_ENDPOINT || "localhost:7051",
@@ -40,20 +82,11 @@ module.exports = {
         "ca.crt"
     ),
 
-    certificatePath: path.join(
-        org1Path,
-        "users",
-        "User1@org1.example.com",
-        "msp",
-        "signcerts",
-        "cert.pem"
-    ),
+    certificatePath: resolveCertificatePath(applicationUserPath),
 
-    privateKeyDirectory: path.join(
-        org1Path,
-        "users",
-        "User1@org1.example.com",
-        "msp",
-        "keystore"
-    )
+    privateKeyDirectory: resolvePrivateKeyDirectory(applicationUserPath),
+
+    adminCertificatePath: resolveCertificatePath(adminUserPath),
+
+    adminPrivateKeyDirectory: resolvePrivateKeyDirectory(adminUserPath)
 };

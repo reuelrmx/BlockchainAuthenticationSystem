@@ -15,6 +15,7 @@ const auditRoutes = require("./routes/auditRoutes");
 const authRoutes = require("./routes/authRoutes");
 const deviceRoutes = require("./routes/deviceRoutes");
 const performanceRoutes = require("./routes/performanceRoutes");
+const policyRoutes = require("./routes/policyRoutes");
 const errorHandler = require("./middleware/errorHandler");
 
 const {
@@ -88,6 +89,7 @@ app.use("/api/audit", auditRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/devices", deviceRoutes);
 app.use("/api/performance", performanceRoutes);
+app.use("/api/policy", policyRoutes);
 
 app.use((req, res) => {
     res.status(404).json({

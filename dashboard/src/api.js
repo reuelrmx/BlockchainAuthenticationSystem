@@ -84,6 +84,17 @@ export function getPerformanceSummary() {
   return request("/api/performance/summary");
 }
 
+export function getAccessPolicy() {
+  return request("/api/policy");
+}
+
+export function updateAccessPolicy(policy) {
+  return request("/api/policy", {
+    method: "PUT",
+    body: JSON.stringify(policy)
+  });
+}
+
 export function suspendDevice(did, reason) {
   return request(`/api/devices/${encodeURIComponent(did)}/suspend`, {
     method: "PATCH",

@@ -13,10 +13,19 @@ const path = require("node:path");
 
 const fabricConfig = require("../config/fabricConfig");
 
-let grpcClient = null;
-let gateway = null;
-let network = null;
-const contracts = new Map();
+const connections = new Map();
+const identityProfiles = {
+    application: {
+        mspId: fabricConfig.mspId,
+        certificatePath: fabricConfig.certificatePath,
+        privateKeyDirectory: fabricConfig.privateKeyDirectory
+    },
+    admin: {
+        mspId: fabricConfig.mspId,
+        certificatePath: fabricConfig.adminCertificatePath,
+        privateKeyDirectory: fabricConfig.adminPrivateKeyDirectory
+    }
+};
 
 /**
  * Finds the first regular file in a directory.
@@ -61,11 +70,22 @@ async function requireFile(filePath, description) {
 }
 
 /**
- * Creates one reusable Fabric Gateway connection.
+ * Creates one reusable Fabric Gateway connection for a named identity.
  */
-async function connectToFabric() {
-    if (network) {
-        return getContract(fabricConfig.contractName);
+async function connectToFabric(identityProfile = "application") {
+    const existingConnection = connections.get(identityProfile);
+
+    if (existingConnection?.network) {
+        return getContract(
+            fabricConfig.contractName,
+            identityProfile
+        );
+    }
+
+    const profile = identityProfiles[identityProfile];
+
+    if (!profile) {
+        throw new Error(`Unknown Fabric identity profile: ${identityProfile}`);
     }
 
     await requireFile(
@@ -74,12 +94,12 @@ async function connectToFabric() {
     );
 
     await requireFile(
-        fabricConfig.certificatePath,
-        "Org1 user certificate"
+        profile.certificatePath,
+        `Fabric ${identityProfile} certificate`
     );
 
     const privateKeyPath = await getFirstFile(
-        fabricConfig.privateKeyDirectory
+        profile.privateKeyDirectory
     );
 
     const tlsRootCertificate = await fs.readFile(
@@ -87,7 +107,7 @@ async function connectToFabric() {
     );
 
     const clientCredentials = await fs.readFile(
-        fabricConfig.certificatePath
+        profile.certificatePath
     );
 
     const privateKeyPem = await fs.readFile(privateKeyPath);
@@ -97,7 +117,7 @@ async function connectToFabric() {
     const tlsCredentials =
         grpc.credentials.createSsl(tlsRootCertificate);
 
-    grpcClient = new grpc.Client(
+    const grpcClient = new grpc.Client(
         fabricConfig.peerEndpoint,
         tlsCredentials,
         {
@@ -106,10 +126,10 @@ async function connectToFabric() {
         }
     );
 
-    gateway = connect({
+    const gateway = connect({
         client: grpcClient,
         identity: {
-            mspId: fabricConfig.mspId,
+            mspId: profile.mspId,
             credentials: clientCredentials
         },
         signer,
@@ -132,34 +152,47 @@ async function connectToFabric() {
         })
     });
 
-    network = gateway.getNetwork(
+    const network = gateway.getNetwork(
         fabricConfig.channelName
     );
 
+    connections.set(identityProfile, {
+        grpcClient,
+        gateway,
+        network,
+        contracts: new Map()
+    });
+
     console.log(
         `Connected to Fabric channel '${fabricConfig.channelName}', ` +
-        `chaincode '${fabricConfig.chaincodeName}'`
+        `chaincode '${fabricConfig.chaincodeName}' as ${identityProfile}`
     );
 
-    return getContract(fabricConfig.contractName);
+    return getContract(fabricConfig.contractName, identityProfile);
 }
 
-async function getContract(contractName = fabricConfig.contractName) {
-    if (!network) {
-        await connectToFabric();
+async function getContract(
+    contractName = fabricConfig.contractName,
+    identityProfile = "application"
+) {
+    let connection = connections.get(identityProfile);
+
+    if (!connection?.network) {
+        await connectToFabric(identityProfile);
+        connection = connections.get(identityProfile);
     }
 
-    if (!contracts.has(contractName)) {
-        contracts.set(
+    if (!connection.contracts.has(contractName)) {
+        connection.contracts.set(
             contractName,
-            network.getContract(
+            connection.network.getContract(
                 fabricConfig.chaincodeName,
                 contractName
             )
         );
     }
 
-    return contracts.get(contractName);
+    return connection.contracts.get(contractName);
 }
 
 /**
@@ -190,7 +223,45 @@ async function submitTransactionForContract(
     transactionName,
     ...args
 ) {
-    const fabricContract = await getContract(contractName);
+    return submitTransactionForContractWithIdentity(
+        "application",
+        contractName,
+        transactionName,
+        ...args
+    );
+}
+
+async function submitAdminTransaction(transactionName, ...args) {
+    return submitAdminTransactionForContract(
+        fabricConfig.contractName,
+        transactionName,
+        ...args
+    );
+}
+
+async function submitAdminTransactionForContract(
+    contractName,
+    transactionName,
+    ...args
+) {
+    return submitTransactionForContractWithIdentity(
+        "admin",
+        contractName,
+        transactionName,
+        ...args
+    );
+}
+
+async function submitTransactionForContractWithIdentity(
+    identityProfile,
+    contractName,
+    transactionName,
+    ...args
+) {
+    const fabricContract = await getContract(
+        contractName,
+        identityProfile
+    );
 
     const resultBytes =
         await fabricContract.submitTransaction(
@@ -264,18 +335,13 @@ function decodeResult(resultBytes) {
  * Closes the reusable gateway and gRPC connection.
  */
 function closeFabricConnection() {
-    if (gateway) {
-        gateway.close();
-        gateway = null;
+    for (const connection of connections.values()) {
+        connection.gateway.close();
+        connection.grpcClient.close();
+        connection.contracts.clear();
     }
 
-    if (grpcClient) {
-        grpcClient.close();
-        grpcClient = null;
-    }
-
-    network = null;
-    contracts.clear();
+    connections.clear();
 }
 
 module.exports = {
@@ -283,6 +349,8 @@ module.exports = {
     getContract,
     submitTransaction,
     submitTransactionForContract,
+    submitAdminTransaction,
+    submitAdminTransactionForContract,
     evaluateTransaction,
     evaluateTransactionForContract,
     closeFabricConnection

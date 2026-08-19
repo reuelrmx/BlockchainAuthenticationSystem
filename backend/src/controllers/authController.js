@@ -23,10 +23,16 @@ const spoofingConfig = require("../config/spoofingConfig");
 const {
     getObservedNetworkContext
 } = require("../services/networkContextService");
+const {
+    mergeDeviceMetadata
+} = require("../services/deviceMetadataService");
 
 const {
     evaluateSpoofing
 } = require("../services/spoofingService");
+const {
+    issueDeviceAccessToken
+} = require("../services/deviceTokenService");
 
 const {
     recordAuthenticationAttempt
@@ -45,7 +51,10 @@ const AUDIT_REASONS = {
     CONTEXT_INCOMPLETE: "CONTEXT_INCOMPLETE",
     UNKNOWN_DEVICE: "UNKNOWN_DEVICE",
     PUBLIC_KEY_UNAVAILABLE: "PUBLIC_KEY_UNAVAILABLE",
-    INTERNAL_VERIFICATION_ERROR: "INTERNAL_VERIFICATION_ERROR"
+    INTERNAL_VERIFICATION_ERROR: "INTERNAL_VERIFICATION_ERROR",
+    DID_NOT_FOUND: "DID_NOT_FOUND",
+    DEVICE_SUSPENDED: "DEVICE_SUSPENDED",
+    DEVICE_REVOKED: "DEVICE_REVOKED"
 };
 
 function isValidFabricDid(did) {
@@ -96,7 +105,9 @@ function isDeviceNotFoundError(error) {
 
 async function getRegisteredDevice(did) {
     try {
-        return await evaluateTransaction("GetDevice", did);
+        const device = await evaluateTransaction("GetDevice", did);
+
+        return mergeDeviceMetadata(device);
     } catch (error) {
         if (isDeviceNotFoundError(error)) {
             return null;
@@ -183,9 +194,64 @@ function buildContractResponseBody({
 
     if (!authenticated) {
         body.reason = getClientReasonForContractDecision(contractResult);
+    } else {
+        try {
+            body.accessToken = issueDeviceAccessToken({
+                did,
+                authEventId: contractResult.eventId
+            });
+        } catch (error) {
+            console.error(
+                "Device access token issuance skipped:",
+                {
+                    did,
+                    authEventId: contractResult.eventId,
+                    message: error.message
+                }
+            );
+        }
     }
 
     return body;
+}
+
+async function sendAuditedChallengeDenial({
+    res,
+    statusCode,
+    did,
+    auditReason,
+    message
+}) {
+    try {
+        const auditEvent = await recordAuthenticationEvent({
+            did,
+            decision: "DENIED",
+            reason: auditReason,
+            spoofingClassification: DEFAULT_SPOOFING_CLASSIFICATION
+        });
+
+        return res.status(statusCode).json({
+            success: false,
+            message,
+            auditEventId: auditEvent.eventId
+        });
+    } catch (error) {
+        console.error(
+            "Challenge-stage audit logging failed:",
+            {
+                did,
+                reason: auditReason,
+                message: error.message,
+                code: error.code,
+                details: error.details
+            }
+        );
+
+        return res.status(502).json({
+            success: false,
+            message: "Authentication audit logging failed"
+        });
+    }
 }
 
 function elapsedMs(startedAt) {
@@ -346,8 +412,11 @@ async function createAuthenticationChallenge(req, res, next) {
         }
 
         if (!device) {
-            return res.status(404).json({
-                success: false,
+            return sendAuditedChallengeDenial({
+                res,
+                statusCode: 404,
+                did,
+                auditReason: AUDIT_REASONS.DID_NOT_FOUND,
                 message: "Device identity does not exist"
             });
         }
@@ -355,22 +424,31 @@ async function createAuthenticationChallenge(req, res, next) {
         const status = String(device.status || "").toUpperCase();
 
         if (status === "SUSPENDED") {
-            return res.status(403).json({
-                success: false,
+            return sendAuditedChallengeDenial({
+                res,
+                statusCode: 403,
+                did,
+                auditReason: AUDIT_REASONS.DEVICE_SUSPENDED,
                 message: "Suspended devices cannot receive authentication challenges"
             });
         }
 
         if (status === "REVOKED") {
-            return res.status(403).json({
-                success: false,
+            return sendAuditedChallengeDenial({
+                res,
+                statusCode: 403,
+                did,
+                auditReason: AUDIT_REASONS.DEVICE_REVOKED,
                 message: "Revoked devices cannot receive authentication challenges"
             });
         }
 
         if (status !== "ACTIVE") {
-            return res.status(403).json({
-                success: false,
+            return sendAuditedChallengeDenial({
+                res,
+                statusCode: 403,
+                did,
+                auditReason: AUDIT_REASONS.DEVICE_NOT_ACTIVE,
                 message: "Only active devices can receive authentication challenges"
             });
         }

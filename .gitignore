@@ -13,6 +13,8 @@ __pycache__/
 
 # Local backend admin store and TLS material
 backend/data/*.json
+backend/data/*.sqlite
+backend/data/*.sqlite-*
 !backend/data/.gitkeep
 backend/certs/*
 !backend/certs/.gitkeep

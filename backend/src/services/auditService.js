@@ -29,7 +29,7 @@ async function recordAuthenticationEvent({
     spoofingClassification = DEFAULT_SPOOFING_CLASSIFICATION
 }) {
     return submitTransactionForContract(
-        fabricConfig.accessControlContractName,
+        fabricConfig.auditLogContractName,
         "LogAuthenticationEvent",
         eventId,
         did,
@@ -67,7 +67,7 @@ async function verifyAuthentication({
 
 async function getAuthenticationEvent(eventId) {
     return evaluateTransactionForContract(
-        fabricConfig.accessControlContractName,
+        fabricConfig.auditLogContractName,
         "GetAuthenticationEvent",
         eventId
     );
@@ -75,15 +75,15 @@ async function getAuthenticationEvent(eventId) {
 
 async function getAllAuthenticationEvents() {
     return evaluateTransactionForContract(
-        fabricConfig.accessControlContractName,
+        fabricConfig.auditLogContractName,
         "GetAllAuthenticationEvents"
     );
 }
 
 async function getAuthenticationEventsByDevice(did) {
     return evaluateTransactionForContract(
-        fabricConfig.accessControlContractName,
-        "GetAuthenticationEventsByDevice",
+        fabricConfig.auditLogContractName,
+        "GetEventsByDevice",
         did
     );
 }

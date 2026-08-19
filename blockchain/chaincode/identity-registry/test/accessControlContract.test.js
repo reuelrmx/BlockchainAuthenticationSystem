@@ -4,6 +4,7 @@ const assert = require("node:assert");
 const crypto = require("node:crypto");
 
 const AccessControlContract = require("../lib/AccessControlContract");
+const IdentityRegistryContract = require("../lib/IdentityRegistryContract");
 
 class MockStub {
     constructor() {
@@ -14,6 +15,15 @@ class MockStub {
 
     createCompositeKey(objectType, attributes) {
         return `${objectType}\u0000${attributes.join("\u0000")}\u0000`;
+    }
+
+    splitCompositeKey(key) {
+        const parts = key.split("\u0000").filter(Boolean);
+
+        return {
+            objectType: parts[0],
+            attributes: parts.slice(1)
+        };
     }
 
     async getState(key) {
@@ -45,11 +55,21 @@ class MockStub {
     }
 }
 
-function createContext() {
+function createContext({ admin = false } = {}) {
     return {
         stub: new MockStub(),
         clientIdentity: {
-            getID: () => "x509::mock"
+            getID: () => admin
+                ? "x509::/CN=Admin@org1.example.com"
+                : "x509::/CN=User1@org1.example.com",
+            getMSPID: () => "Org1MSP",
+            getAttributeValue: (name) => {
+                if (name === "hf.Type") {
+                    return admin ? "admin" : "client";
+                }
+
+                return null;
+            }
         }
     };
 }
@@ -122,6 +142,7 @@ async function verify(contract, ctx, {
 
 async function run() {
     const contract = new AccessControlContract();
+    const identityContract = new IdentityRegistryContract();
     const did = "did:fabric:test-device";
     const payload = "did:fabric:test-device|challenge-id|nonce|expires";
     const {
@@ -158,6 +179,8 @@ async function run() {
 
         assert.strictEqual(storedEvent.challengePayload, undefined);
         assert.strictEqual(storedEvent.signature, undefined);
+        assert.strictEqual(storedEvent.observedMacAddress, undefined);
+        assert.strictEqual(typeof storedEvent.observedMacAddressHash, "string");
     }
 
     {
@@ -323,6 +346,117 @@ async function run() {
             }),
             /already exists/
         );
+    }
+
+    {
+        const ctx = createContext();
+        await putDevice(ctx, {
+            did,
+            publicKey
+        });
+
+        const result = await verify(contract, ctx, {
+            eventId: "event-mac-mismatch-allowed",
+            did,
+            payload,
+            signature,
+            classification: "MAC_MISMATCH"
+        });
+
+        assert.strictEqual(result.authenticated, false);
+        assert.strictEqual(result.reason, "MAC_MISMATCH");
+    }
+
+    {
+        const ctx = createContext({ admin: true });
+        const updatedPolicy = await contract.UpdateAccessPolicy(
+            ctx,
+            JSON.stringify({
+                requireMacContext: true,
+                requireIpContext: true,
+                denyIncompleteNetworkContext: false,
+                macMismatchAction: "ALLOW",
+                ipMismatchAction: "DENY"
+            })
+        );
+        const policy = JSON.parse(updatedPolicy);
+
+        assert.strictEqual(policy.macMismatchAction, "ALLOW");
+        assert.strictEqual(policy.ipMismatchAction, "DENY");
+        assert.strictEqual(typeof policy.policyHash, "string");
+
+        await putDevice(ctx, {
+            did,
+            publicKey
+        });
+
+        const result = await verify(contract, ctx, {
+            eventId: "event-policy-allows-mac-mismatch",
+            did,
+            payload,
+            signature,
+            classification: "MAC_MISMATCH"
+        });
+
+        assert.strictEqual(result.authenticated, true);
+        assert.strictEqual(result.reason, "VALID_SIGNATURE");
+        assert.strictEqual(result.spoofingClassification, "MAC_MISMATCH");
+    }
+
+    {
+        const ctx = createContext();
+
+        await assert.rejects(
+            () => contract.UpdateAccessPolicy(
+                ctx,
+                JSON.stringify({
+                    macMismatchAction: "ALLOW",
+                    ipMismatchAction: "DENY"
+                })
+            ),
+            /Fabric administrator authorization required/
+        );
+    }
+
+    {
+        const ctx = createContext();
+
+        await assert.rejects(
+            () => identityContract.RegisterDevice(
+                ctx,
+                "did:fabric:new-device",
+                publicKey,
+                "Test owner",
+                "a".repeat(64),
+                "192.168.1.0/24",
+                "b".repeat(64),
+                "c".repeat(64)
+            ),
+            /Fabric administrator authorization required/
+        );
+    }
+
+    {
+        const ctx = createContext({ admin: true });
+        const registered = JSON.parse(
+            await identityContract.RegisterDevice(
+                ctx,
+                "did:fabric:new-device",
+                publicKey,
+                "Test owner",
+                "a".repeat(64),
+                "192.168.1.0/24",
+                "b".repeat(64),
+                "c".repeat(64)
+            )
+        );
+
+        assert.strictEqual(registered.schemaVersion, "2026-05");
+        assert.strictEqual(registered.registeredMacAddress, undefined);
+        assert.strictEqual(registered.registeredMacAddressHash, "a".repeat(64));
+        assert.strictEqual(registered.allowedIpCidr, "192.168.1.0/24");
+        assert.strictEqual(registered.metadataHash, "b".repeat(64));
+        assert.strictEqual(registered.didDocumentHash, "c".repeat(64));
     }
 
     console.log("AccessControlContract VerifyAuthentication tests passed");

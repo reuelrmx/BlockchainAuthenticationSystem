@@ -1,6 +1,7 @@
 "use strict";
 
 const { execFile } = require("node:child_process");
+const crypto = require("node:crypto");
 const net = require("node:net");
 const { promisify } = require("node:util");
 
@@ -45,6 +46,96 @@ function normalizeMacAddress(value) {
     }
 
     return compact.match(/.{2}/g).join(":");
+}
+
+function hashMacAddress(value) {
+    const normalized = normalizeMacAddress(value);
+
+    if (!normalized) {
+        return null;
+    }
+
+    return crypto
+        .createHash("sha256")
+        .update(normalized)
+        .digest("hex");
+}
+
+function ipv4ToNumber(ipAddress) {
+    const normalizedIpAddress = normalizeIpAddress(ipAddress);
+
+    if (
+        !normalizedIpAddress ||
+        net.isIP(normalizedIpAddress) !== 4
+    ) {
+        return null;
+    }
+
+    return normalizedIpAddress
+        .split(".")
+        .reduce((value, section) =>
+            ((value << 8) >>> 0) + Number(section),
+        0) >>> 0;
+}
+
+function normalizeAllowedIpCidr(value) {
+    if (typeof value !== "string" || value.trim() === "") {
+        return null;
+    }
+
+    const trimmed = value.trim();
+    const parts = trimmed.split("/");
+    const ipAddress = normalizeIpAddress(parts[0]);
+
+    if (!ipAddress || net.isIP(ipAddress) !== 4) {
+        return null;
+    }
+
+    if (parts.length === 1) {
+        return `${ipAddress}/32`;
+    }
+
+    if (parts.length !== 2 || !/^\d{1,2}$/.test(parts[1])) {
+        return null;
+    }
+
+    const prefixLength = Number(parts[1]);
+
+    if (prefixLength < 0 || prefixLength > 32) {
+        return null;
+    }
+
+    return `${ipAddress}/${prefixLength}`;
+}
+
+function isIpInCidr(ipAddress, allowedCidr) {
+    const observedIpNumber = ipv4ToNumber(ipAddress);
+    const normalizedCidr = normalizeAllowedIpCidr(allowedCidr);
+
+    if (observedIpNumber === null || !normalizedCidr) {
+        return null;
+    }
+
+    const [networkAddress, prefixLengthText] =
+        normalizedCidr.split("/");
+    const networkNumber = ipv4ToNumber(networkAddress);
+    const prefixLength = Number(prefixLengthText);
+
+    if (networkNumber === null) {
+        return null;
+    }
+
+    if (prefixLength === 0) {
+        return true;
+    }
+
+    const mask = (0xffffffff << (32 - prefixLength)) >>> 0;
+
+    return (
+        (observedIpNumber & mask) >>> 0
+    ) === (
+        (networkNumber & mask) >>> 0
+    );
 }
 
 function getHeaderValue(req, name) {
@@ -162,6 +253,9 @@ async function getObservedNetworkContext(req) {
 
 module.exports = {
     getObservedNetworkContext,
+    hashMacAddress,
+    isIpInCidr,
+    normalizeAllowedIpCidr,
     normalizeIpAddress,
     normalizeMacAddress
 };

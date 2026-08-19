@@ -16,6 +16,7 @@ import {
   Search,
   ShieldAlert,
   ShieldCheck,
+  SlidersHorizontal,
   Smartphone,
   UserCircle,
   X
@@ -24,6 +25,7 @@ import {
 import {
   API_BASE_URL,
   activateDevice,
+  getAccessPolicy,
   getCurrentAdmin,
   getAuthenticationEvents,
   getDevices,
@@ -33,7 +35,8 @@ import {
   logoutAdmin,
   registerDevice,
   revokeDevice,
-  suspendDevice
+  suspendDevice,
+  updateAccessPolicy
 } from "./api";
 
 const NAV_ITEMS = [
@@ -66,6 +69,12 @@ const NAV_ITEMS = [
     label: "Performance",
     icon: BarChart3,
     description: "Authentication response time, success rate, and throughput."
+  },
+  {
+    id: "policy",
+    label: "Access Policy",
+    icon: SlidersHorizontal,
+    description: "Global MAC/IP authentication context policy."
   }
 ];
 
@@ -120,6 +129,7 @@ const AUDIT_REASON_LABELS = {
   MAC_AND_IP_MISMATCH: "MAC & IP mismatch",
   MAC_AND_IP_MISMATCH_DETECTED: "MAC & IP mismatch",
   DEVICE_NOT_ACTIVE: "Device is not active",
+  DID_NOT_FOUND: "Device identity was not found",
   INVALID_CHALLENGE: "Invalid or expired authentication challenge",
   CHALLENGE_NOT_FOUND: "Invalid or expired authentication challenge",
   CHALLENGE_EXPIRED: "Invalid or expired authentication challenge",
@@ -229,6 +239,12 @@ function getSpoofingClassification(event) {
     .toUpperCase();
 }
 
+function getObservedMacDisplay(event) {
+  return event?.observedMacAddress ||
+    event?.observedMacAddressHash ||
+    null;
+}
+
 function getTone(value) {
   const normalized = String(value || "UNKNOWN").toUpperCase();
 
@@ -309,6 +325,31 @@ function isValidIpv6Address(ipAddress) {
 
 function isValidIpAddress(ipAddress) {
   return isValidIpv4Address(ipAddress) || isValidIpv6Address(ipAddress);
+}
+
+function normalizeAllowedIpCidr(value) {
+  const trimmedValue = String(value || "").trim();
+  const [ipAddress, prefix] = trimmedValue.split("/");
+
+  if (!isValidIpv4Address(ipAddress)) {
+    return null;
+  }
+
+  if (prefix === undefined) {
+    return `${ipAddress}/32`;
+  }
+
+  if (!/^\d{1,2}$/.test(prefix)) {
+    return null;
+  }
+
+  const prefixLength = Number(prefix);
+
+  if (prefixLength < 0 || prefixLength > 32) {
+    return null;
+  }
+
+  return `${ipAddress}/${prefixLength}`;
 }
 
 function isValidPublicKeyPem(publicKey) {
@@ -967,7 +1008,7 @@ function AuditTable({ events, compact = false }) {
             <th>DID</th>
             <th>Decision</th>
             <th>Reason</th>
-            <th>Observed MAC</th>
+            <th>Observed MAC / Hash</th>
             <th>Observed IP</th>
             <th>Spoofing</th>
             <th>Transaction ID</th>
@@ -987,7 +1028,7 @@ function AuditTable({ events, compact = false }) {
                 <DecisionBadge value={event.decision} />
               </td>
               <td title={formatReason(event.reason)}>{formatReason(event.reason)}</td>
-              <td className="mono-cell">{valueOrDash(event.observedMacAddress)}</td>
+              <td className="mono-cell">{valueOrDash(getObservedMacDisplay(event))}</td>
               <td className="mono-cell">{valueOrDash(event.observedIpAddress)}</td>
               <td>
                 <SpoofingBadge value={event.spoofingClassification} />
@@ -1015,7 +1056,7 @@ function SpoofingAlertsTable({ events }) {
             <th>Device</th>
             <th>Detection</th>
             <th>Observed IP</th>
-            <th>Observed MAC</th>
+            <th>Observed MAC / Hash</th>
             <th>Outcome</th>
             <th>Transaction</th>
           </tr>
@@ -1031,7 +1072,7 @@ function SpoofingAlertsTable({ events }) {
                 <SpoofingBadge value={event.spoofingClassification} />
               </td>
               <td className="mono-cell">{valueOrDash(event.observedIpAddress)}</td>
-              <td className="mono-cell">{valueOrDash(event.observedMacAddress)}</td>
+              <td className="mono-cell">{valueOrDash(getObservedMacDisplay(event))}</td>
               <td>
                 <DecisionBadge value={event.decision} />
               </td>
@@ -1192,6 +1233,169 @@ function PerformanceView({ performance, error }) {
   );
 }
 
+function AccessPolicyView({ policy, error, canManage, onSave }) {
+  const [form, setForm] = useState({
+    requireMacContext: true,
+    requireIpContext: true,
+    denyIncompleteNetworkContext: false,
+    macMismatchAction: "DENY",
+    ipMismatchAction: "DENY"
+  });
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [saveError, setSaveError] = useState("");
+
+  useEffect(() => {
+    if (!policy) {
+      return;
+    }
+
+    setForm({
+      requireMacContext: Boolean(policy.requireMacContext),
+      requireIpContext: Boolean(policy.requireIpContext),
+      denyIncompleteNetworkContext:
+        Boolean(policy.denyIncompleteNetworkContext),
+      macMismatchAction: policy.macMismatchAction || "DENY",
+      ipMismatchAction: policy.ipMismatchAction || "DENY"
+    });
+    setMessage("");
+    setSaveError("");
+  }, [policy]);
+
+  function updateField(field, value) {
+    setForm((current) => ({
+      ...current,
+      [field]: value
+    }));
+    setMessage("");
+    setSaveError("");
+  }
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+
+    if (!canManage) {
+      return;
+    }
+
+    setBusy(true);
+    setMessage("");
+    setSaveError("");
+
+    try {
+      await onSave(form);
+      setMessage("Access policy saved");
+    } catch (saveFailure) {
+      setSaveError(saveFailure.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (error) {
+    return <ErrorState message={error} />;
+  }
+
+  if (!policy) {
+    return <EmptyState message="Access policy is not available." />;
+  }
+
+  return (
+    <PageSection title="Global Authentication Policy">
+      <form className="policy-form" onSubmit={handleSubmit}>
+        <div className="policy-grid">
+          <label className="policy-toggle">
+            <input
+              checked={form.requireMacContext}
+              disabled={!canManage || busy}
+              onChange={(event) =>
+                updateField("requireMacContext", event.target.checked)
+              }
+              type="checkbox"
+            />
+            <span>Require MAC context</span>
+          </label>
+
+          <label className="policy-toggle">
+            <input
+              checked={form.requireIpContext}
+              disabled={!canManage || busy}
+              onChange={(event) =>
+                updateField("requireIpContext", event.target.checked)
+              }
+              type="checkbox"
+            />
+            <span>Require IP context</span>
+          </label>
+
+          <label className="policy-toggle">
+            <input
+              checked={form.denyIncompleteNetworkContext}
+              disabled={!canManage || busy}
+              onChange={(event) =>
+                updateField(
+                  "denyIncompleteNetworkContext",
+                  event.target.checked
+                )
+              }
+              type="checkbox"
+            />
+            <span>Deny incomplete network context</span>
+          </label>
+
+          <label className="login-field">
+            <span>MAC mismatch action</span>
+            <select
+              disabled={!canManage || busy}
+              onChange={(event) =>
+                updateField("macMismatchAction", event.target.value)
+              }
+              value={form.macMismatchAction}
+            >
+              <option value="DENY">Deny</option>
+              <option value="ALLOW">Allow</option>
+            </select>
+          </label>
+
+          <label className="login-field">
+            <span>IP mismatch action</span>
+            <select
+              disabled={!canManage || busy}
+              onChange={(event) =>
+                updateField("ipMismatchAction", event.target.value)
+              }
+              value={form.ipMismatchAction}
+            >
+              <option value="DENY">Deny</option>
+              <option value="ALLOW">Allow</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="policy-meta">
+          <span>Policy hash {shortId(policy.policyHash)}</span>
+          <span>Last updated {formatDate(policy.updatedAt)}</span>
+        </div>
+
+        {saveError ? <ErrorState message={saveError} /> : null}
+        {message ? <div className="success-note">{message}</div> : null}
+
+        <div className="policy-actions">
+          {canManage ? (
+            <button className="button" disabled={busy} type="submit">
+              {busy ? "Saving" : "Save policy"}
+            </button>
+          ) : (
+            <span className="viewer-note">
+              Viewer role can inspect policy but cannot modify it.
+            </span>
+          )}
+        </div>
+      </form>
+    </PageSection>
+  );
+}
+
 function AddDeviceModal({ open, onClose, onRegister }) {
   const [owner, setOwner] = useState("");
   const [macAddress, setMacAddress] = useState("");
@@ -1251,8 +1455,10 @@ function AddDeviceModal({ open, onClose, onRegister }) {
       throw new Error("MAC address must use AA:BB:CC:DD:EE:FF format");
     }
 
-    if (!isValidIpAddress(trimmedIpAddress)) {
-      throw new Error("IP address is not valid");
+    const normalizedAllowedIpCidr = normalizeAllowedIpCidr(trimmedIpAddress);
+
+    if (!normalizedAllowedIpCidr) {
+      throw new Error("IP context must be an IPv4 address or CIDR range");
     }
 
     if (!isValidPublicKeyPem(trimmedPublicKey)) {
@@ -1262,7 +1468,8 @@ function AddDeviceModal({ open, onClose, onRegister }) {
     return {
       owner: trimmedOwner,
       macAddress: normalizedMacAddress,
-      ipAddress: trimmedIpAddress,
+      ipAddress: normalizedAllowedIpCidr,
+      allowedIpCidr: normalizedAllowedIpCidr,
       publicKey: trimmedPublicKey
     };
   }
@@ -1407,11 +1614,11 @@ function AddDeviceModal({ open, onClose, onRegister }) {
               </label>
 
               <label className="login-field">
-                <span>IP address</span>
+                <span>Allowed IP / CIDR</span>
                 <input
                   autoComplete="off"
                   onChange={(event) => setIpAddress(event.target.value)}
-                  placeholder="192.168.1.10"
+                  placeholder="192.168.1.10 or 192.168.1.0/24"
                   required
                   type="text"
                   value={ipAddress}
@@ -1647,6 +1854,7 @@ function App() {
   const [devices, setDevices] = useState(null);
   const [events, setEvents] = useState(null);
   const [performance, setPerformance] = useState(null);
+  const [policy, setPolicy] = useState(null);
   const [errors, setErrors] = useState({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -1679,12 +1887,14 @@ function App() {
       const devicesResult = await settleRequest(getDevices);
       const auditResult = await settleRequest(getAuthenticationEvents);
       const performanceResult = await settleRequest(getPerformanceSummary);
+      const policyResult = await settleRequest(getAccessPolicy);
       const nextErrors = {};
 
       if (
         isUnauthorizedResult(devicesResult) ||
         isUnauthorizedResult(auditResult) ||
-        isUnauthorizedResult(performanceResult)
+        isUnauthorizedResult(performanceResult) ||
+        isUnauthorizedResult(policyResult)
       ) {
         setAdmin(null);
         setAuthError("Your administrator session has expired");
@@ -1692,6 +1902,7 @@ function App() {
         setDevices(null);
         setEvents(null);
         setPerformance(null);
+        setPolicy(null);
         setSelectedDevice(null);
         setAddDeviceOpen(false);
         setLoading(false);
@@ -1732,6 +1943,12 @@ function App() {
         setPerformance(performanceResult.value.data || null);
       } else {
         nextErrors.performance = performanceResult.reason.message;
+      }
+
+      if (policyResult.status === "fulfilled") {
+        setPolicy(policyResult.value.data || null);
+      } else {
+        nextErrors.policy = policyResult.reason.message;
       }
 
       setErrors(nextErrors);
@@ -1907,6 +2124,19 @@ function App() {
     return device;
   }
 
+  async function handleUpdatePolicy(nextPolicy) {
+    if (!canManageDevices) {
+      throw new Error("Administrator role is required to update policy");
+    }
+
+    const result = await updateAccessPolicy(nextPolicy);
+
+    setPolicy(result.data);
+    await refreshData();
+
+    return result.data;
+  }
+
   async function confirmAction() {
     if (!actionState || !canManageDevices) {
       return;
@@ -1964,6 +2194,7 @@ function App() {
     setDevices(null);
     setEvents(null);
     setPerformance(null);
+    setPolicy(null);
     setErrors({});
     setSelectedDevice(null);
     setAddDeviceOpen(false);
@@ -2134,6 +2365,15 @@ function App() {
           <PerformanceView
             performance={performance}
             error={errors.performance}
+          />
+        ) : null}
+
+        {!loading && activeView === "policy" ? (
+          <AccessPolicyView
+            policy={policy}
+            error={errors.policy}
+            canManage={canManageDevices}
+            onSave={handleUpdatePolicy}
           />
         ) : null}
       </main>

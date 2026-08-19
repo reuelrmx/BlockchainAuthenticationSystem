@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "fabric-chaincode-node start",
-    "test": "node --check index.js && node --check lib/IdentityRegistryContract.js && node --check lib/AccessControlContract.js && node --check test/accessControlContract.test.js && node test/accessControlContract.test.js"
+    "test": "node --check index.js && node --check lib/authorization.js && node --check lib/auditState.js && node --check lib/IdentityRegistryContract.js && node --check lib/AccessControlContract.js && node --check lib/AuditLogContract.js && node --check test/accessControlContract.test.js && node test/accessControlContract.test.js"
   },
   "engines": {
     "node": ">=18"

@@ -1,6 +1,13 @@
 "use strict";
 
 const { Contract } = require("fabric-contract-api");
+const {
+    buildGenericAuditEvent,
+    putGenericAuditEvent
+} = require("./auditState");
+const {
+    assertFabricAdministrator
+} = require("./authorization");
 
 class IdentityRegistryContract extends Contract {
     constructor() {
@@ -16,6 +23,14 @@ class IdentityRegistryContract extends Contract {
     _requireValue(value, fieldName) {
         if (typeof value !== "string" || value.trim() === "") {
             throw new Error(`${fieldName} is required`);
+        }
+    }
+
+    _requireSha256Hex(value, fieldName) {
+        this._requireValue(value, fieldName);
+
+        if (!/^[0-9a-f]{64}$/i.test(value.trim())) {
+            throw new Error(`${fieldName} must be a SHA-256 hex hash`);
         }
     }
 
@@ -85,14 +100,22 @@ class IdentityRegistryContract extends Contract {
         did,
         publicKey,
         owner,
-        macAddress,
-        ipAddress
+        registeredMacAddressHash,
+        allowedIpCidr,
+        metadataHash,
+        didDocumentHash
     ) {
+        assertFabricAdministrator(ctx, "RegisterDevice");
         this._requireValue(did, "DID");
         this._requireValue(publicKey, "Public key");
         this._requireValue(owner, "Owner");
-        this._requireValue(macAddress, "MAC address");
-        this._requireValue(ipAddress, "IP address");
+        this._requireSha256Hex(
+            registeredMacAddressHash,
+            "Registered MAC address hash"
+        );
+        this._requireValue(allowedIpCidr, "Allowed IP/CIDR context");
+        this._requireSha256Hex(metadataHash, "Metadata hash");
+        this._requireSha256Hex(didDocumentHash, "DID Document hash");
 
         const exists = await this.DeviceExists(ctx, did);
 
@@ -104,11 +127,16 @@ class IdentityRegistryContract extends Contract {
 
         const device = {
             docType: "deviceIdentity",
+            schemaVersion: "2026-05",
             did: did.trim(),
             publicKey: publicKey.trim(),
             owner: owner.trim(),
-            registeredMacAddress: macAddress.trim().toUpperCase(),
-            registeredIpAddress: ipAddress.trim(),
+            registeredMacAddressHash:
+                registeredMacAddressHash.trim().toLowerCase(),
+            allowedIpCidr: allowedIpCidr.trim(),
+            metadataHash: metadataHash.trim().toLowerCase(),
+            didDocumentHash: didDocumentHash.trim().toLowerCase(),
+            metadataReference: `off-chain:device-metadata:${did.trim()}`,
             status: "ACTIVE",
             registeredAt: timestamp,
             updatedAt: timestamp,
@@ -186,6 +214,7 @@ class IdentityRegistryContract extends Contract {
      * @returns {Promise<string>}
      */
     async SuspendDevice(ctx, did, reason) {
+        assertFabricAdministrator(ctx, "SuspendDevice");
         this._requireValue(reason, "Suspension reason");
 
         const deviceJson = await this.GetDevice(ctx, did);
@@ -234,6 +263,7 @@ class IdentityRegistryContract extends Contract {
      * @returns {Promise<string>}
      */
     async ActivateDevice(ctx, did) {
+        assertFabricAdministrator(ctx, "ActivateDevice");
         const deviceJson = await this.GetDevice(ctx, did);
         const device = JSON.parse(deviceJson);
 
@@ -280,6 +310,7 @@ class IdentityRegistryContract extends Contract {
      * @returns {Promise<string>}
      */
     async RevokeDevice(ctx, did, reason) {
+        assertFabricAdministrator(ctx, "RevokeDevice");
         this._requireValue(reason, "Revocation reason");
 
         const deviceJson = await this.GetDevice(ctx, did);
@@ -303,6 +334,22 @@ class IdentityRegistryContract extends Contract {
         await ctx.stub.putState(
             deviceKey,
             Buffer.from(JSON.stringify(device))
+        );
+
+        await putGenericAuditEvent(
+            ctx,
+            buildGenericAuditEvent(
+                ctx,
+                "DEVICE_REVOKED",
+                {
+                    eventId: `revocation-${ctx.stub.getTxID()}`,
+                    did,
+                    details: {
+                        reason: device.revocationReason,
+                        revokedAt: device.revokedAt
+                    }
+                }
+            )
         );
 
         ctx.stub.setEvent(

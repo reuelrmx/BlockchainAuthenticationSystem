@@ -5,6 +5,9 @@ const { performance } = require("node:perf_hooks");
 const spoofingConfig = require("../config/spoofingConfig");
 
 const {
+    hashMacAddress,
+    isIpInCidr,
+    normalizeAllowedIpCidr,
     normalizeIpAddress,
     normalizeMacAddress
 } = require("./networkContextService");
@@ -26,6 +29,51 @@ function evaluateMatch(registeredValue, observedValue, normalizer) {
         registered,
         observed
     };
+}
+
+function evaluateMacContext(device, observedMacAddress) {
+    const observed = normalizeMacAddress(observedMacAddress);
+
+    if (device?.registeredMacAddressHash) {
+        const observedHash = hashMacAddress(observed);
+
+        return {
+            match: observedHash
+                ? observedHash === device.registeredMacAddressHash
+                : null,
+            registered: device.registeredMacAddressHash,
+            observed,
+            observedHash
+        };
+    }
+
+    return evaluateMatch(
+        device?.registeredMacAddress,
+        observed,
+        normalizeMacAddress
+    );
+}
+
+function evaluateIpContext(device, observedIpAddress) {
+    const observed = normalizeIpAddress(observedIpAddress);
+    const allowedCidr = normalizeAllowedIpCidr(
+        device?.allowedIpCidr ||
+        device?.registeredIpAddress
+    );
+
+    if (allowedCidr) {
+        return {
+            match: isIpInCidr(observed, allowedCidr),
+            registered: allowedCidr,
+            observed
+        };
+    }
+
+    return evaluateMatch(
+        device?.registeredIpAddress,
+        observed,
+        normalizeIpAddress
+    );
 }
 
 function classify(macMatch, ipMatch) {
@@ -50,15 +98,13 @@ function classify(macMatch, ipMatch) {
 
 function evaluateSpoofing(device, observedContext) {
     const start = performance.now();
-    const macEvaluation = evaluateMatch(
-        device?.registeredMacAddress,
-        observedContext?.observedMacAddress,
-        normalizeMacAddress
+    const macEvaluation = evaluateMacContext(
+        device,
+        observedContext?.observedMacAddress
     );
-    const ipEvaluation = evaluateMatch(
-        device?.registeredIpAddress,
-        observedContext?.observedIpAddress,
-        normalizeIpAddress
+    const ipEvaluation = evaluateIpContext(
+        device,
+        observedContext?.observedIpAddress
     );
 
     const classification = classify(
@@ -82,8 +128,12 @@ function evaluateSpoofing(device, observedContext) {
         macMatch: macEvaluation.match,
         ipMatch: ipEvaluation.match,
         registeredMacAddress: macEvaluation.registered,
+        registeredMacAddressHash:
+            device?.registeredMacAddressHash || null,
         registeredIpAddress: ipEvaluation.registered,
+        allowedIpCidr: ipEvaluation.registered,
         observedMacAddress: macEvaluation.observed,
+        observedMacAddressHash: macEvaluation.observedHash || null,
         observedIpAddress: ipEvaluation.observed,
         comparisonTimeMs: Number(
             (performance.now() - start).toFixed(3)

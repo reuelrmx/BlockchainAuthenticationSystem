@@ -3,7 +3,23 @@
 const crypto = require("node:crypto");
 const { Contract } = require("fabric-contract-api");
 
-const DEFAULT_SPOOFING_CLASSIFICATION = "NOT_EVALUATED";
+const {
+    DEFAULT_SPOOFING_CLASSIFICATION,
+    authenticationEventExists,
+    buildAuthenticationEvent,
+    buildGenericAuditEvent,
+    getAllAuthenticationEvents,
+    getAuthenticationEvent,
+    getAuthenticationEventsByDevice,
+    getTransactionTimestamp,
+    normalizeOptionalValue,
+    putAuthenticationEvent,
+    putGenericAuditEvent,
+    requireValue
+} = require("./auditState");
+const {
+    assertFabricAdministrator
+} = require("./authorization");
 
 const CRYPTOGRAPHIC_DENIAL_CLASSIFICATION = "NOT_EVALUATED";
 
@@ -16,11 +32,13 @@ const SPOOFING_CLASSIFICATIONS = new Set([
     "MAC_AND_IP_MISMATCH"
 ]);
 
-const SPOOFING_DENIAL_REASONS = new Set([
-    "MAC_MISMATCH",
-    "IP_MISMATCH",
-    "MAC_AND_IP_MISMATCH"
-]);
+const DEFAULT_ACCESS_POLICY = Object.freeze({
+    requireMacContext: true,
+    requireIpContext: true,
+    denyIncompleteNetworkContext: false,
+    macMismatchAction: "DENY",
+    ipMismatchAction: "DENY"
+});
 
 class AccessControlContract extends Contract {
     constructor() {
@@ -28,46 +46,19 @@ class AccessControlContract extends Contract {
     }
 
     _requireValue(value, fieldName) {
-        if (typeof value !== "string" || value.trim() === "") {
-            throw new Error(`${fieldName} is required`);
-        }
+        requireValue(value, fieldName);
     }
 
     _getTransactionTimestamp(ctx) {
-        const timestamp = ctx.stub.getTxTimestamp();
-
-        const seconds =
-            typeof timestamp.seconds === "object"
-                ? timestamp.seconds.toNumber()
-                : Number(timestamp.seconds);
-
-        const milliseconds =
-            seconds * 1000 + Math.floor(timestamp.nanos / 1000000);
-
-        return new Date(milliseconds).toISOString();
-    }
-
-    _createAuthenticationEventKey(ctx, eventId) {
-        return ctx.stub.createCompositeKey("AUTH_EVENT", [eventId]);
-    }
-
-    _createAuthenticationEventByDeviceKey(ctx, did, eventId) {
-        return ctx.stub.createCompositeKey(
-            "AUTH_EVENT_BY_DEVICE",
-            [did, eventId]
-        );
+        return getTransactionTimestamp(ctx);
     }
 
     _createDeviceKey(ctx, did) {
         return ctx.stub.createCompositeKey("DEVICE", [did]);
     }
 
-    _normalizeOptionalValue(value) {
-        if (typeof value !== "string" || value.trim() === "") {
-            return null;
-        }
-
-        return value.trim();
+    _createAccessPolicyKey(ctx) {
+        return ctx.stub.createCompositeKey("ACCESS_POLICY", ["GLOBAL"]);
     }
 
     _normalizeDecision(decision) {
@@ -82,7 +73,7 @@ class AccessControlContract extends Contract {
 
     _normalizeSpoofingClassification(spoofingClassification) {
         const normalized =
-            this._normalizeOptionalValue(spoofingClassification) ||
+            normalizeOptionalValue(spoofingClassification) ||
             DEFAULT_SPOOFING_CLASSIFICATION;
         const upper = normalized.trim().toUpperCase();
 
@@ -115,6 +106,66 @@ class AccessControlContract extends Contract {
         throw new Error(`${fieldName} must be true or false`);
     }
 
+    _normalizeAction(value, fieldName) {
+        const normalized = String(value || "").trim().toUpperCase();
+
+        if (normalized === "DENY" || normalized === "ALLOW") {
+            return normalized;
+        }
+
+        throw new Error(`${fieldName} must be DENY or ALLOW`);
+    }
+
+    _stableStringify(value) {
+        if (Array.isArray(value)) {
+            return `[${value.map((entry) =>
+                this._stableStringify(entry)
+            ).join(",")}]`;
+        }
+
+        if (value && typeof value === "object") {
+            return `{${Object.keys(value)
+                .sort()
+                .map((key) =>
+                    `${JSON.stringify(key)}:${this._stableStringify(value[key])}`
+                )
+                .join(",")}}`;
+        }
+
+        return JSON.stringify(value);
+    }
+
+    _hashPolicy(policy) {
+        return crypto
+            .createHash("sha256")
+            .update(this._stableStringify(policy))
+            .digest("hex");
+    }
+
+    _normalizeAccessPolicy(input) {
+        const suppliedPolicy =
+            typeof input === "string" ? JSON.parse(input) : input;
+        const mergedPolicy = {
+            ...DEFAULT_ACCESS_POLICY,
+            ...(suppliedPolicy || {})
+        };
+
+        return {
+            requireMacContext: Boolean(mergedPolicy.requireMacContext),
+            requireIpContext: Boolean(mergedPolicy.requireIpContext),
+            denyIncompleteNetworkContext:
+                Boolean(mergedPolicy.denyIncompleteNetworkContext),
+            macMismatchAction: this._normalizeAction(
+                mergedPolicy.macMismatchAction,
+                "MAC mismatch action"
+            ),
+            ipMismatchAction: this._normalizeAction(
+                mergedPolicy.ipMismatchAction,
+                "IP mismatch action"
+            )
+        };
+    }
+
     _verifySignature(publicKeyPem, challengePayload, signatureBase64) {
         if (
             typeof publicKeyPem !== "string" ||
@@ -142,13 +193,6 @@ class AccessControlContract extends Contract {
         }
     }
 
-    async _authenticationEventExists(ctx, eventId) {
-        const key = this._createAuthenticationEventKey(ctx, eventId);
-        const bytes = await ctx.stub.getState(key);
-
-        return Boolean(bytes && bytes.length > 0);
-    }
-
     async _getDevice(ctx, did) {
         const deviceKey = this._createDeviceKey(ctx, did);
         const deviceBytes = await ctx.stub.getState(deviceKey);
@@ -160,69 +204,115 @@ class AccessControlContract extends Contract {
         return JSON.parse(deviceBytes.toString());
     }
 
-    async _putAuthenticationEvent(ctx, event) {
-        const eventKey = this._createAuthenticationEventKey(
+    async _getAccessPolicy(ctx) {
+        const key = this._createAccessPolicyKey(ctx);
+        const policyBytes = await ctx.stub.getState(key);
+
+        if (!policyBytes || policyBytes.length === 0) {
+            return {
+                ...DEFAULT_ACCESS_POLICY,
+                policyId: "GLOBAL",
+                source: "default",
+                policyHash: this._hashPolicy(DEFAULT_ACCESS_POLICY)
+            };
+        }
+
+        return JSON.parse(policyBytes.toString());
+    }
+
+    _getSpoofingDenialReason(classification, policy) {
+        if (
+            classification === "MAC_AND_IP_MISMATCH" &&
+            (
+                policy.macMismatchAction === "DENY" ||
+                policy.ipMismatchAction === "DENY"
+            )
+        ) {
+            return "MAC_AND_IP_MISMATCH";
+        }
+
+        if (
+            classification === "MAC_MISMATCH" &&
+            policy.macMismatchAction === "DENY"
+        ) {
+            return "MAC_MISMATCH";
+        }
+
+        if (
+            classification === "IP_MISMATCH" &&
+            policy.ipMismatchAction === "DENY"
+        ) {
+            return "IP_MISMATCH";
+        }
+
+        if (
+            classification === "CONTEXT_INCOMPLETE" &&
+            policy.denyIncompleteNetworkContext
+        ) {
+            return "CONTEXT_INCOMPLETE";
+        }
+
+        return null;
+    }
+
+    /**
+     * Returns the global prototype authentication policy.
+     */
+    async GetAccessPolicy(ctx) {
+        return JSON.stringify(await this._getAccessPolicy(ctx));
+    }
+
+    /**
+     * Updates the global authentication policy.
+     *
+     * Only Fabric administrator identities may mutate this policy.
+     */
+    async UpdateAccessPolicy(ctx, policyJson) {
+        assertFabricAdministrator(ctx, "UpdateAccessPolicy");
+        requireValue(policyJson, "Access policy");
+
+        const policy = this._normalizeAccessPolicy(policyJson);
+        const timestamp = this._getTransactionTimestamp(ctx);
+        const storedPolicy = {
+            ...policy,
+            policyId: "GLOBAL",
+            source: "ledger",
+            updatedAt: timestamp,
+            updatedBy: ctx.clientIdentity.getID(),
+            transactionId: ctx.stub.getTxID(),
+            policyHash: this._hashPolicy(policy)
+        };
+
+        await ctx.stub.putState(
+            this._createAccessPolicyKey(ctx),
+            Buffer.from(JSON.stringify(storedPolicy))
+        );
+
+        await putGenericAuditEvent(
             ctx,
-            event.eventId
-        );
-
-        const deviceEventKey =
-            this._createAuthenticationEventByDeviceKey(
+            buildGenericAuditEvent(
                 ctx,
-                event.did,
-                event.eventId
-            );
-
-        await ctx.stub.putState(
-            eventKey,
-            Buffer.from(JSON.stringify(event))
-        );
-
-        await ctx.stub.putState(
-            deviceEventKey,
-            Buffer.from(JSON.stringify({
-                eventId: event.eventId
-            }))
+                "ACCESS_POLICY_UPDATED",
+                {
+                    eventId: `policy-${ctx.stub.getTxID()}`,
+                    details: {
+                        policyHash: storedPolicy.policyHash
+                    }
+                }
+            )
         );
 
         ctx.stub.setEvent(
-            "AuthenticationEventRecorded",
+            "AccessPolicyUpdated",
             Buffer.from(JSON.stringify({
-                eventId: event.eventId,
-                did: event.did,
-                decision: event.decision,
-                reason: event.reason,
-                timestamp: event.timestamp,
-                transactionId: event.transactionId
+                policyId: storedPolicy.policyId,
+                policyHash: storedPolicy.policyHash,
+                updatedAt: storedPolicy.updatedAt,
+                transactionId: storedPolicy.transactionId
             }))
         );
-    }
 
-    _buildAuthenticationEvent({
-        ctx,
-        eventId,
-        did,
-        decision,
-        reason,
-        observedMacAddress,
-        observedIpAddress,
-        spoofingClassification
-    }) {
-        return {
-            docType: "authenticationEvent",
-            eventId,
-            did,
-            timestamp: this._getTransactionTimestamp(ctx),
-            decision,
-            reason,
-            observedMacAddress:
-                this._normalizeOptionalValue(observedMacAddress),
-            observedIpAddress:
-                this._normalizeOptionalValue(observedIpAddress),
-            spoofingClassification,
-            recordedBy: ctx.clientIdentity.getID(),
-            transactionId: ctx.stub.getTxID()
-        };
+        return JSON.stringify(storedPolicy);
     }
 
     async LogAuthenticationEvent(
@@ -241,13 +331,11 @@ class AccessControlContract extends Contract {
         this._requireValue(reason, "Reason");
 
         const normalizedEventId = eventId.trim();
-        const normalizedDid = did.trim();
         const normalizedDecision = this._normalizeDecision(decision);
-        const normalizedReason = reason.trim().toUpperCase();
         const normalizedSpoofingClassification =
             this._normalizeSpoofingClassification(spoofingClassification);
 
-        const exists = await this._authenticationEventExists(
+        const exists = await authenticationEventExists(
             ctx,
             normalizedEventId
         );
@@ -258,18 +346,18 @@ class AccessControlContract extends Contract {
             );
         }
 
-        const event = this._buildAuthenticationEvent({
+        const event = buildAuthenticationEvent({
             ctx,
             eventId: normalizedEventId,
-            did: normalizedDid,
+            did: did.trim(),
             decision: normalizedDecision,
-            reason: normalizedReason,
+            reason: reason.trim().toUpperCase(),
             observedMacAddress,
             observedIpAddress,
             spoofingClassification: normalizedSpoofingClassification
         });
 
-        await this._putAuthenticationEvent(ctx, event);
+        await putAuthenticationEvent(ctx, event);
 
         return JSON.stringify(event);
     }
@@ -294,12 +382,12 @@ class AccessControlContract extends Contract {
         const normalizedDid = did.trim();
         const normalizedSpoofingClassification =
             this._normalizeSpoofingClassification(spoofingClassification);
-        const denyIncomplete = this._parseBoolean(
+        const legacyDenyIncomplete = this._parseBoolean(
             denyIncompleteNetworkContext,
             "Deny incomplete network context"
         );
 
-        const exists = await this._authenticationEventExists(
+        const exists = await authenticationEventExists(
             ctx,
             normalizedEventId
         );
@@ -311,6 +399,13 @@ class AccessControlContract extends Contract {
         }
 
         const device = await this._getDevice(ctx, normalizedDid);
+        const policy = await this._getAccessPolicy(ctx);
+        const effectivePolicy = {
+            ...policy,
+            denyIncompleteNetworkContext:
+                policy.denyIncompleteNetworkContext ||
+                legacyDenyIncomplete
+        };
         let decision = "DENIED";
         let reason = "UNKNOWN_DEVICE";
         let finalSpoofingClassification =
@@ -331,24 +426,24 @@ class AccessControlContract extends Contract {
             signatureBase64.trim()
         )) {
             reason = "INVALID_SIGNATURE";
-        } else if (
-            SPOOFING_DENIAL_REASONS.has(normalizedSpoofingClassification)
-        ) {
-            reason = normalizedSpoofingClassification;
-            finalSpoofingClassification = normalizedSpoofingClassification;
-        } else if (
-            normalizedSpoofingClassification === "CONTEXT_INCOMPLETE" &&
-            denyIncomplete
-        ) {
-            reason = "CONTEXT_INCOMPLETE";
-            finalSpoofingClassification = normalizedSpoofingClassification;
         } else {
-            decision = "GRANTED";
-            reason = "VALID_SIGNATURE";
-            finalSpoofingClassification = normalizedSpoofingClassification;
+            const spoofingDenialReason = this._getSpoofingDenialReason(
+                normalizedSpoofingClassification,
+                effectivePolicy
+            );
+
+            finalSpoofingClassification =
+                normalizedSpoofingClassification;
+
+            if (spoofingDenialReason) {
+                reason = spoofingDenialReason;
+            } else {
+                decision = "GRANTED";
+                reason = "VALID_SIGNATURE";
+            }
         }
 
-        const event = this._buildAuthenticationEvent({
+        const event = buildAuthenticationEvent({
             ctx,
             eventId: normalizedEventId,
             did: normalizedDid,
@@ -359,7 +454,7 @@ class AccessControlContract extends Contract {
             spoofingClassification: finalSpoofingClassification
         });
 
-        await this._putAuthenticationEvent(ctx, event);
+        await putAuthenticationEvent(ctx, event);
 
         return JSON.stringify({
             eventId: event.eventId,
@@ -375,101 +470,17 @@ class AccessControlContract extends Contract {
     async GetAuthenticationEvent(ctx, eventId) {
         this._requireValue(eventId, "Event ID");
 
-        const key = this._createAuthenticationEventKey(
-            ctx,
-            eventId.trim()
-        );
-
-        const bytes = await ctx.stub.getState(key);
-
-        if (!bytes || bytes.length === 0) {
-            throw new Error(
-                `Authentication event ${eventId} does not exist`
-            );
-        }
-
-        return bytes.toString();
+        return getAuthenticationEvent(ctx, eventId);
     }
 
     async GetAllAuthenticationEvents(ctx) {
-        const iterator = await ctx.stub.getStateByPartialCompositeKey(
-            "AUTH_EVENT",
-            []
-        );
-
-        const events = [];
-
-        try {
-            while (true) {
-                const result = await iterator.next();
-
-                if (result.value && result.value.value) {
-                    const value = result.value.value.toString("utf8");
-
-                    if (value) {
-                        events.push(JSON.parse(value));
-                    }
-                }
-
-                if (result.done) {
-                    break;
-                }
-            }
-        } finally {
-            await iterator.close();
-        }
-
-        events.sort(
-            (a, b) => new Date(a.timestamp) - new Date(b.timestamp)
-        );
-
-        return JSON.stringify(events);
+        return getAllAuthenticationEvents(ctx);
     }
 
     async GetAuthenticationEventsByDevice(ctx, did) {
         this._requireValue(did, "DID");
 
-        const normalizedDid = did.trim();
-        const iterator = await ctx.stub.getStateByPartialCompositeKey(
-            "AUTH_EVENT_BY_DEVICE",
-            [normalizedDid]
-        );
-
-        const events = [];
-
-        try {
-            while (true) {
-                const result = await iterator.next();
-
-                if (result.value && result.value.key) {
-                    const compositeKey =
-                        ctx.stub.splitCompositeKey(result.value.key);
-                    const eventId = compositeKey.attributes[1];
-
-                    if (eventId) {
-                        const eventJson =
-                            await this.GetAuthenticationEvent(
-                                ctx,
-                                eventId
-                            );
-
-                        events.push(JSON.parse(eventJson));
-                    }
-                }
-
-                if (result.done) {
-                    break;
-                }
-            }
-        } finally {
-            await iterator.close();
-        }
-
-        events.sort(
-            (a, b) => new Date(a.timestamp) - new Date(b.timestamp)
-        );
-
-        return JSON.stringify(events);
+        return getAuthenticationEventsByDevice(ctx, did.trim());
     }
 }
 
