@@ -1,0 +1,22 @@
+{
+  "name": "blockchain-authentication-dashboard",
+  "version": "1.0.0",
+  "description": "Administrator dashboard for the blockchain authentication system",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev-server.mjs",
+    "build": "node scripts/build.mjs",
+    "preview": "node scripts/dev-server.mjs --no-watch",
+    "check": "npm run build",
+    "smoke": "node scripts/smoke-test.mjs"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "lucide-react": "^0.468.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}
