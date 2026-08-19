@@ -34,6 +34,16 @@ comparison/results/*.md
 comparison/radius/runtime/
 comparison/ldap/runtime/
 
+# Generated Ethereum benchmark output
+ethereum-benchmark/results/*.json
+ethereum-benchmark/results/*.csv
+ethereum-benchmark/results/*.md
+ethereum-benchmark/cache/
+ethereum-benchmark/artifacts/
+ethereum-benchmark/node_modules/
+ethereum-benchmark/.hardhat-config/
+!ethereum-benchmark/results/.gitkeep
+
 # Generated device identities
 gateway/device-client/devices/*
 !gateway/device-client/devices/.gitkeep

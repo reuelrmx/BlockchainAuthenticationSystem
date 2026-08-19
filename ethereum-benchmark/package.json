@@ -1,0 +1,17 @@
+{
+  "name": "blockchain-authentication-ethereum-benchmark",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Ethereum smart-contract benchmark for comparison with the Hyperledger Fabric authentication prototype.",
+  "scripts": {
+    "compile": "XDG_CONFIG_HOME=$PWD/.hardhat-config XDG_CACHE_HOME=$PWD/.hardhat-config/cache hardhat compile",
+    "test": "XDG_CONFIG_HOME=$PWD/.hardhat-config XDG_CACHE_HOME=$PWD/.hardhat-config/cache hardhat test",
+    "benchmark": "XDG_CONFIG_HOME=$PWD/.hardhat-config XDG_CACHE_HOME=$PWD/.hardhat-config/cache hardhat run scripts/run-benchmark.js",
+    "check": "node --check hardhat.config.js && node --check scripts/run-benchmark.js && node --check scripts/report-comparison.js && node --check test/AuthenticationBenchmark.test.js"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox-viem": "^5.0.7",
+    "hardhat": "^3.0.0"
+  }
+}
