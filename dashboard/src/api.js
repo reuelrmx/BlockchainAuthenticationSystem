@@ -69,6 +69,13 @@ export function getDevices() {
   return request("/api/devices");
 }
 
+export function registerDevice(registration) {
+  return request("/api/devices/register", {
+    method: "POST",
+    body: JSON.stringify(registration)
+  });
+}
+
 export function getAuthenticationEvents() {
   return request("/api/audit/authentication");
 }

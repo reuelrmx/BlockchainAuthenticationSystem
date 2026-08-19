@@ -341,8 +341,9 @@ async function runChecks(client) {
   const overview = await client.evaluate(`
     (() => ({
       adminRoleShown: document.body.innerText.includes(${JSON.stringify(dashboardExpectedRole)}),
-      hasHealth: document.body.innerText.includes("Fabric") &&
-        document.body.innerText.includes("connected"),
+      hasHealthSection: document.body.innerText.includes("System Health"),
+      hasRecentAuthenticationSection:
+        document.body.innerText.includes("Recent Authentication"),
       totalDevicesText: [...document.querySelectorAll(".stat-card")]
         .find((card) => card.textContent.includes("Total Devices"))
         ?.textContent || "",
@@ -353,7 +354,7 @@ async function runChecks(client) {
   await clickButton(client, "Devices");
   await waitForCondition(
     client,
-    `document.body.innerText.includes("Registered Devices") &&
+    `document.body.innerText.includes("Devices") &&
       document.querySelectorAll("tbody tr").length > 0`,
     "devices table"
   );
@@ -364,7 +365,7 @@ async function runChecks(client) {
 
   const detailsOpened = await client.evaluate(`
     (() => {
-      const button = document.querySelector("button[title='View device details']");
+      const button = document.querySelector("button[title='View']");
 
       if (!button) return false;
       button.click();
@@ -378,8 +379,8 @@ async function runChecks(client) {
 
   await waitForCondition(
     client,
-    `document.body.innerText.includes("Device Details") &&
-      document.body.innerText.includes("Public Key")`,
+    `document.querySelector(".details-drawer") &&
+      document.querySelector(".drawer-code-section summary")`,
     "device details"
   );
   await clickCloseDetails(client);
@@ -393,6 +394,27 @@ async function runChecks(client) {
       "suspend-test device row"
     );
 
+    const suspendDeviceOpened = await client.evaluate(`
+      (() => {
+        const button = document.querySelector("button[title='View']");
+
+        if (!button) return false;
+        button.click();
+        return true;
+      })()
+    `);
+
+    if (!suspendDeviceOpened) {
+      throw new Error("Suspend-test device details button not found");
+    }
+
+    await waitForCondition(
+      client,
+      `document.querySelector(".details-drawer") &&
+        document.body.innerText.includes("Phase 3 Suspend Test Device")`,
+      "suspend-test drawer"
+    );
+
     await clickButton(client, "Suspend");
     await waitForCondition(
       client,
@@ -404,7 +426,7 @@ async function runChecks(client) {
     await clickButton(client, "Suspend Device");
     await waitForCondition(
       client,
-      `document.body.innerText.includes("SUSPENDED") &&
+      `document.body.innerText.includes("Suspended") &&
         document.body.innerText.includes("Activate")`,
       "suspended status"
     );
@@ -418,15 +440,17 @@ async function runChecks(client) {
     await clickButton(client, "Activate Device");
     await waitForCondition(
       client,
-      `document.body.innerText.includes("ACTIVE") &&
+      `document.body.innerText.includes("Active") &&
         document.body.innerText.includes("Suspend")`,
       "active status restoration"
     );
+    await clickCloseDetails(client);
   } else {
     const privilegedButtons = await client.evaluate(`
       [...document.querySelectorAll("button")]
         .map((button) => button.textContent.trim())
         .filter((text) =>
+          text === "Add device" ||
           text === "Suspend" ||
           text === "Activate" ||
           text === "Revoke"
@@ -450,13 +474,13 @@ async function runChecks(client) {
   await setSelectByIndex(client, 0, "DENIED");
   await waitForCondition(
     client,
-    `document.body.innerText.includes("DENIED")`,
+    `document.body.innerText.includes("Denied")`,
     "decision filter"
   );
   await setSelectByIndex(client, 1, "MAC_MISMATCH");
   await waitForCondition(
     client,
-    `document.body.innerText.includes("MAC_MISMATCH")`,
+    `document.body.innerText.includes("MAC mismatch")`,
     "spoofing filter"
   );
 
@@ -484,14 +508,31 @@ async function runChecks(client) {
   await clickButton(client, "Performance");
   await waitForCondition(
     client,
-    `document.body.innerText.includes("Live Operational Metrics") &&
-      document.body.innerText.includes("Formal Evaluation Metrics")`,
+    `document.body.innerText.includes("Summary Metrics") &&
+      document.body.innerText.includes("Requirements") &&
+      document.body.innerText.includes("Concurrency Results")`,
     "performance view"
   );
 
   const performance = await client.evaluate(`
     (() => ({
-      hasLiveMetrics: document.body.innerText.includes("Attempts Since Start"),
+      hasSummaryMetrics:
+        document.body.innerText.includes("Authentication Response Time") &&
+        document.body.innerText.includes("50-concurrent mean latency") &&
+        document.body.innerText.includes("Last evaluated:"),
+      hidesDetailedRuntimeMetrics:
+        !document.body.innerText.includes("Attempts Since Start") &&
+        !document.body.innerText.includes("Live Success Rate") &&
+        !document.body.innerText.includes("Recent Mean Latency") &&
+        !document.body.innerText.includes("Last Evaluation") &&
+        !document.body.innerText.includes("Fabric Health") &&
+        !document.body.innerText.includes("Formal Evaluation Metrics") &&
+        !document.body.innerText.includes("Phase 11 harness") &&
+        !document.body.innerText.includes("RSS") &&
+        !document.body.innerText.includes("Load Average"),
+      hasFormalThroughput:
+        !document.body.innerText.includes("0 auth/s") &&
+        document.body.innerText.includes("27.829 auth/s"),
       hasNoEvaluationMessage:
         document.body.innerText.includes("No evaluation data available"),
       hasConcurrencyTable:
