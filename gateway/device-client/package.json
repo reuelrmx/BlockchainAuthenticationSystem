@@ -5,8 +5,9 @@
   "main": "register-device.js",
   "scripts": {
     "register": "node register-device.js",
+    "authenticate": "node authenticate-device.js",
     "test-signature": "node test-signature.js",
-    "check": "node --check register-device.js && node --check test-signature.js"
+    "check": "node --check register-device.js && node --check authenticate-device.js && node --check test-signature.js"
   },
   "author": "Ruel Mumba",
   "license": "MIT"
